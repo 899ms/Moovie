@@ -96,6 +96,24 @@ func TestDoubanFetchReportsEveryEndpointAndMarksAllNotFoundTerminal(t *testing.T
 	}
 }
 
+func TestDoubanFetchPersistsAllNotFoundMarker(t *testing.T) {
+	store := NewPostgresStore(testdb.Pool(t))
+	if err := store.Upsert(t.Context(), Movie{DoubanID: "35185594", Title: "资源站占位"}); err != nil {
+		t.Fatal(err)
+	}
+	writer := &canonicalWriterStub{}
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return statusResponse(request, http.StatusNotFound, nil, `{}`), nil
+	})}
+	err := NewDoubanProvider(client, store, WithDoubanCanonicalWriter(writer)).Fetch(t.Context(), "35185594", false)
+	if !workqueue.IsTerminal(err) {
+		t.Fatalf("error = %v, want terminal", err)
+	}
+	if writer.snapshotProvider != "douban" || writer.snapshotSuccess || writer.snapshotError != doubanNotFoundMarker || string(writer.snapshot) != `{}` {
+		t.Fatalf("snapshot = provider:%q success:%t error:%q payload:%s", writer.snapshotProvider, writer.snapshotSuccess, writer.snapshotError, writer.snapshot)
+	}
+}
+
 func TestDoubanFetchKeepsRetryingWhenOnlySomeEndpointsReturnNotFound(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if strings.Contains(request.URL.Path, "/tv/") {

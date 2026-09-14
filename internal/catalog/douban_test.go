@@ -40,6 +40,43 @@ func TestDoubanProviderFallsBackAcrossMediaTypesAndMapsMovie(t *testing.T) {
 	}
 }
 
+func TestDoubanProviderPrioritizesStoredMediaTypeForMetadataAndReviews(t *testing.T) {
+	store := NewPostgresStore(testdb.Pool(t))
+	if err := store.Upsert(t.Context(), Movie{DoubanID: "30181230", Title: "测试综艺", MediaType: "show"}); err != nil {
+		t.Fatal(err)
+	}
+	requests := make([]string, 0, 2)
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests = append(requests, request.URL.Path)
+		if strings.HasSuffix(request.URL.Path, "/interests") {
+			return jsonResponse(request, http.StatusOK, `{"interests":[]}`), nil
+		}
+		return jsonResponse(request, http.StatusOK, `{"id":"30181230","title":"测试综艺"}`), nil
+	})}
+	provider := NewDoubanProvider(client, store)
+	if err := provider.Fetch(t.Context(), "30181230", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.FetchReviews(t.Context(), "30181230"); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 || !strings.Contains(requests[0], "/show/30181230") || !strings.Contains(requests[1], "/show/30181230/interests") {
+		t.Fatalf("request order = %#v", requests)
+	}
+}
+
+func TestDoubanProviderMapsCartoonHintToTVEndpoint(t *testing.T) {
+	store := NewPostgresStore(testdb.Pool(t))
+	if err := store.Upsert(t.Context(), Movie{DoubanID: "30181230", Title: "测试动画", MediaType: "cartoon"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := NewDoubanProvider(http.DefaultClient, store)
+	ordered := provider.detailMediaTypes(t.Context(), "30181230")
+	if len(ordered) != 3 || ordered[0] != "tv" || ordered[1] != "movie" || ordered[2] != "show" {
+		t.Fatalf("endpoint order = %#v", ordered)
+	}
+}
+
 func TestDoubanProviderUsesSuccessfulDetailEndpointForCanonicalMediaType(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if strings.Contains(request.URL.Path, "/movie/") {
@@ -55,8 +92,8 @@ func TestDoubanProviderUsesSuccessfulDetailEndpointForCanonicalMediaType(t *test
 	if err := provider.Fetch(t.Context(), "30181230", false); err != nil {
 		t.Fatal(err)
 	}
-	if len(database.arguments) != 0 {
-		t.Fatalf("canonical path must not overwrite fields via legacy Upsert: %#v", database.arguments)
+	if database.execQuery != "" {
+		t.Fatalf("canonical path must not overwrite fields via legacy Upsert: %s", database.execQuery)
 	}
 	if writer.media.MediaType != "tv" {
 		t.Fatalf("canonical media type = %q, want tv", writer.media.MediaType)

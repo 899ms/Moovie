@@ -69,6 +69,37 @@ func TestMoviePagePreservesIndexedSEOJSONLDAndUserSignals(t *testing.T) {
 	}
 }
 
+func TestMoviePageHidesUnverifiedDoubanClaimsAfterAllEndpointsNotFound(t *testing.T) {
+	pool := testdb.Pool(t)
+	store := NewPostgresStore(pool)
+	if err := store.Upsert(t.Context(), Movie{DoubanID: "35185594", Title: "资源站占位", Year: "2020", MetadataStatus: "partial"}); err != nil {
+		t.Fatal(err)
+	}
+	movie, err := store.FindByDoubanID(t.Context(), "35185594")
+	if err != nil || movie == nil {
+		t.Fatalf("movie/error = %+v/%v", movie, err)
+	}
+	if _, err := pool.Exec(t.Context(), `INSERT INTO media_source_snapshots(media_id,provider,error_message)
+VALUES($1,'douban','not_found')`, movie.ID); err != nil {
+		t.Fatal(err)
+	}
+	router := catalogTestRouter(t, store, nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/movie/35185594", nil))
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s", recorder.Code, body)
+	}
+	for _, forbidden := range []string{"movie.douban.com/subject/35185594", "豆瓣评分", `/api/htmx/reviews?douban_id=35185594`} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("known missing Douban identity leaked %q: %s", forbidden, body)
+		}
+	}
+	if !strings.Contains(body, `/api/htmx/movie-actions?douban_id=35185594`) {
+		t.Fatal("local playback and user actions disappeared with the invalid external identity")
+	}
+}
+
 func TestMoviePageOnlyShowsDirectPlayForIndexedPlayableResources(t *testing.T) {
 	store := NewPostgresStore(testdb.Pool(t))
 	_ = store.Upsert(t.Context(), Movie{DoubanID: "1292052", Title: "肖申克", Year: "1994", EmbeddingContent: "ready"})

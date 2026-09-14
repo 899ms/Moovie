@@ -438,7 +438,15 @@ func (handler *Handler) movie(c *gin.Context) {
 		}))
 		return
 	}
-	if needsMetadataRefresh(movie, time.Now()) {
+	doubanNotFound := false
+	if availability, ok := handler.store.(DoubanAvailabilityReader); ok {
+		doubanNotFound, err = availability.DoubanNotFound(c.Request.Context(), doubanID)
+		if err != nil {
+			requestmeta.Logger(c.Request.Context()).Warn("read Douban availability", "douban_id", doubanID, "error", err)
+			doubanNotFound = false
+		}
+	}
+	if !doubanNotFound && needsMetadataRefresh(movie, time.Now()) {
 		if _, queueErr := handler.enqueueRefresh(c.Request.Context(), doubanID, RefreshProviderDouban, RefreshReasonPartialMetadata); queueErr != nil {
 			requestmeta.Logger(c.Request.Context()).Warn("queue partial metadata", "douban_id", doubanID, "error", queueErr)
 		}
@@ -465,11 +473,16 @@ func (handler *Handler) movie(c *gin.Context) {
 		"@context": "https://schema.org", "@type": schemaType,
 		"name": movie.Title, "url": canonical,
 	}
-	sameAs := []string{"https://movie.douban.com/subject/" + movie.DoubanID + "/"}
+	sameAs := []string{}
+	if !doubanNotFound {
+		sameAs = append(sameAs, "https://movie.douban.com/subject/"+movie.DoubanID+"/")
+	}
 	if movie.IMDbID != "" {
 		sameAs = append(sameAs, "https://www.imdb.com/title/"+movie.IMDbID+"/")
 	}
-	mediaSchema["sameAs"] = sameAs
+	if len(sameAs) > 0 {
+		mediaSchema["sameAs"] = sameAs
+	}
 	if movie.Poster != "" {
 		mediaSchema["image"] = movie.Poster
 	}
@@ -508,7 +521,7 @@ func (handler *Handler) movie(c *gin.Context) {
 		JSONLD: []template.JS{mediaJSONLD, breadcrumbJSONLD},
 	}, gin.H{
 		"Movie": movie, "DirectorList": directors, "SearchTitle": searchTitle,
-		"DiscoverURL": discoverURL, "DiscoverLabel": discoverLabel,
+		"DiscoverURL": discoverURL, "DiscoverLabel": discoverLabel, "DoubanNotFound": doubanNotFound,
 	}))
 }
 

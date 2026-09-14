@@ -40,6 +40,34 @@ func TestPostgresStoreSearchUsesPlaybackQualityAndPreservesMapping(t *testing.T)
 	}
 }
 
+func TestResourceUpsertDoesNotRequeueKnownMissingDoubanID(t *testing.T) {
+	pool := testdb.Pool(t)
+	var mediaID int
+	if err := pool.QueryRow(t.Context(), `INSERT INTO media(douban_id,title,metadata_status)
+VALUES('35185594','资源站占位','partial') RETURNING id`).Scan(&mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `INSERT INTO media_source_snapshots(media_id,provider,error_message)
+VALUES($1,'douban','not_found')`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	store := NewPostgresStore(pool)
+	if err := store.Upsert(t.Context(), VodItem{
+		SourceKey: "source", VodId: "42", VodName: "资源站占位", VodDoubanId: "35185594",
+		TypeName: "电影", VodPlayUrl: "正片$https://video.example/main.m3u8",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var jobs int
+	if err := pool.QueryRow(t.Context(), `SELECT COUNT(*) FROM worker_jobs
+WHERE task_type='douban_metadata' AND subject_key='35185594'`).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if jobs != 0 {
+		t.Fatalf("known missing Douban ID queued %d metadata jobs", jobs)
+	}
+}
+
 func TestPostgresStoreSearchesCanonicalMediaAndAliases(t *testing.T) {
 	database := &fakeSQLDatabase{rows: &fakeSQLRows{values: [][]any{{int64(7), "流浪地球", "The Wandering Earth", []string{"流浪地球别名"}, "2019", "movie", "poster", "26266893", 9.7, "一部关于...", "科幻,冒险", "中国", `[{"name":"导演甲"}]`, `[{"name":"演员甲"}]`, "125分钟"}}}}
 	store := NewPostgresStore(database)

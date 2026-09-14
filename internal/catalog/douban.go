@@ -25,6 +25,10 @@ import (
 // 这里把全进程的豆瓣请求串行化，出问题时 Pause 还会让大家一起冷却。
 const defaultDoubanRequestInterval = 200 * time.Millisecond
 
+// doubanNotFoundMarker 写进来源快照，表示 movie/tv/show 三个详情端点均已确认 404。
+// 自动任务会跳过这个标记；管理员手动刷新仍可重新验证。
+const doubanNotFoundMarker = "not_found"
+
 // searchDiscoveryCooldown 是同一个关键词再次询问豆瓣联想的最小间隔。
 // 取 24 小时是因为第一次询问就把命中的条目排进了资料抓取队列，一天足够 worker 抓完入库，
 // 之后这个词走本地 media 就能命中，不必再问豆瓣。
@@ -260,7 +264,7 @@ func (provider *DoubanProvider) Fetch(ctx context.Context, doubanID string, _ bo
 	}
 	_, err, _ := provider.group.Do("movie:"+doubanID, func() (any, error) {
 		var attempts mediaTypeAttempts
-		for _, mediaType := range []string{"movie", "tv", "show"} {
+		for _, mediaType := range provider.detailMediaTypes(ctx, doubanID) {
 			endpoint := fmt.Sprintf("%s/rexxar/api/v2/%s/%s?ck=&for_mobile=1", strings.TrimRight(provider.base, "/"), mediaType, url.PathEscape(doubanID))
 			var response rexxarMovie
 			if err := provider.getJSON(ctx, endpoint, "https://m.douban.com/", &response); err != nil {
@@ -294,7 +298,13 @@ func (provider *DoubanProvider) Fetch(ctx context.Context, doubanID string, _ bo
 			}
 			return nil, nil
 		}
-		return nil, attempts.err("fetch Douban movie " + doubanID)
+		fetchErr := attempts.err("fetch Douban movie " + doubanID)
+		if workqueue.IsTerminal(fetchErr) {
+			if err := provider.rememberNotFound(ctx, doubanID); err != nil {
+				return nil, fmt.Errorf("record missing Douban movie %s: %w", doubanID, err)
+			}
+		}
+		return nil, fetchErr
 	})
 	return err
 }
@@ -306,7 +316,7 @@ func (provider *DoubanProvider) FetchReviews(ctx context.Context, doubanID strin
 	}
 	_, err, _ := provider.group.Do("reviews:"+doubanID, func() (any, error) {
 		var attempts mediaTypeAttempts
-		for _, mediaType := range []string{"movie", "tv", "show"} {
+		for _, mediaType := range provider.detailMediaTypes(ctx, doubanID) {
 			endpoint := fmt.Sprintf("%s/rexxar/api/v2/%s/%s/interests?count=10&order_by=hot&anony=0&start=0&ck=&for_mobile=1", strings.TrimRight(provider.base, "/"), mediaType, url.PathEscape(doubanID))
 			var response struct {
 				Interests []struct {
@@ -353,6 +363,51 @@ func (provider *DoubanProvider) FetchReviews(ctx context.Context, doubanID strin
 		return nil, attempts.err("fetch Douban reviews " + doubanID)
 	})
 	return err
+}
+
+// detailMediaTypes 优先使用本地已有的类型提示，减少剧集和综艺先撞 movie 端点的请求。
+// 资源站类型并非权威，因此提示失败后仍保留其余端点兜底；动漫在豆瓣详情中走 tv。
+func (provider *DoubanProvider) detailMediaTypes(ctx context.Context, doubanID string) []string {
+	defaults := []string{"movie", "tv", "show"}
+	reader, ok := provider.store.(interface {
+		DoubanMediaTypeHint(context.Context, string) (string, error)
+	})
+	if !ok {
+		return defaults
+	}
+	hintValue, err := reader.DoubanMediaTypeHint(ctx, doubanID)
+	if err != nil {
+		return defaults
+	}
+	hint := mediatype.Normalize(hintValue)
+	if hint == "cartoon" {
+		hint = "tv"
+	}
+	if hint != "movie" && hint != "tv" && hint != "show" {
+		return defaults
+	}
+	ordered := []string{hint}
+	for _, mediaType := range defaults {
+		if mediaType != hint {
+			ordered = append(ordered, mediaType)
+		}
+	}
+	return ordered
+}
+
+// rememberNotFound 持久化详情端点的全 404 结论，防止新的自动任务重复探测同一无效 ID。
+func (provider *DoubanProvider) rememberNotFound(ctx context.Context, doubanID string) error {
+	if provider.canonical == nil {
+		return nil
+	}
+	movie, err := provider.store.FindByDoubanID(ctx, doubanID)
+	if err != nil {
+		return err
+	}
+	if movie == nil || movie.ID <= 0 {
+		return nil
+	}
+	return provider.canonical.WriteSourceSnapshot(ctx, movie.ID, "douban", []byte(`{}`), false, doubanNotFoundMarker)
 }
 
 // mediaTypeAttempts 汇总 movie / tv / show 三个 rexxar 端点的失败原因。

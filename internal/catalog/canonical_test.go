@@ -35,6 +35,8 @@ type canonicalWriterStub struct {
 	aliases          []mediaidentity.Alias
 	snapshotProvider string
 	snapshot         []byte
+	snapshotSuccess  bool
+	snapshotError    string
 }
 
 func (writer *canonicalWriterStub) UpsertAlias(_ context.Context, alias mediaidentity.Alias) error {
@@ -53,8 +55,10 @@ func (writer *canonicalWriterStub) UpsertExternalID(_ context.Context, external 
 	return nil
 }
 
-func (writer *canonicalWriterStub) WriteSourceSnapshot(_ context.Context, _ int, provider string, payload []byte, _ bool, _ string) error {
+func (writer *canonicalWriterStub) WriteSourceSnapshot(_ context.Context, _ int, provider string, payload []byte, success bool, errorMessage string) error {
 	writer.snapshotProvider = provider
 	writer.snapshot = append([]byte(nil), payload...)
+	writer.snapshotSuccess = success
+	writer.snapshotError = errorMessage
 	return nil
 }

@@ -70,7 +70,7 @@
                 </div>
                 {{ end }}
 
-                {{ if .Movie.DoubanID }}
+                {{ if and .Movie.DoubanID (not .DoubanNotFound) }}
                 <div class="attr-row">
                     <span class="attr-label">豆瓣:</span>
                     <span class="attr-value"><a class="external-id-link external-id-link-douban" href="https://movie.douban.com/subject/{{ .Movie.DoubanID }}" target="_blank" rel="noopener nofollow">{{ .Movie.DoubanID }}</a></span>
@@ -88,6 +88,7 @@
 
         <!-- 评分与操作 -->
         <div class="movie-rating-col">
+            {{ if not .DoubanNotFound }}
             <div class="rating-block">
                 <div class="rating-title">豆瓣评分</div>
                 {{ if .Movie.Rating }}
@@ -104,6 +105,7 @@
                         title="点击重新抓取豆瓣评分">暂无</button>
                 {{ end }}
             </div>
+            {{ end }}
             <div hx-get="/api/htmx/movie-actions?douban_id={{ .Movie.DoubanID }}&media_id={{ .Movie.ID }}&title={{ urlquery .Movie.Title }}&poster={{ urlquery .Movie.Poster }}&year={{ urlquery .Movie.Year }}"
                  hx-trigger="load"
                  hx-swap="innerHTML"></div>
@@ -138,7 +140,7 @@
     </div>
 
     <!-- 豆瓣短评 -->
-    {{ if .Movie.DoubanID }}
+    {{ if and .Movie.DoubanID (not .DoubanNotFound) }}
     <div class="movie-section">
         <h2 class="section-title">豆瓣短评</h2>
         <div id="movie-reviews"

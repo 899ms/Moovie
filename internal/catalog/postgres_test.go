@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/TwoThreeWang/Moovie/new/internal/content"
+	"github.com/TwoThreeWang/Moovie/new/internal/mediaidentity"
 	"github.com/TwoThreeWang/Moovie/new/internal/mediatitle"
 	"github.com/TwoThreeWang/Moovie/new/internal/platform/database"
 	"github.com/TwoThreeWang/Moovie/new/internal/platform/database/testdb"
@@ -256,7 +257,7 @@ func TestPostgresMetadataRefreshQueueUsesUnifiedWorkerJobs(t *testing.T) {
 	if err := store.ScheduleDueRefreshes(t.Context(), 20); err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"next_refresh_at <= NOW()", "worker_jobs", "ON CONFLICT (task_type, subject_key)", "next_refresh_at = NOW() + INTERVAL '24 hours'"} {
+	for _, expected := range []string{"next_refresh_at <= NOW()", "worker_jobs", "ON CONFLICT (task_type, subject_key)", "next_refresh_at = NOW() + INTERVAL '24 hours'", "error_message = 'not_found'"} {
 		if !strings.Contains(fake.execQuery, expected) {
 			t.Fatalf("schedule query missing %q: %s", expected, fake.execQuery)
 		}
@@ -264,7 +265,7 @@ func TestPostgresMetadataRefreshQueueUsesUnifiedWorkerJobs(t *testing.T) {
 	if err := store.ScheduleActiveContentRefreshes(t.Context(), 10); err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"playback_results", "event.succeeded", "INTERVAL '24 hours'", "INTERVAL '3 days'", "active_content"} {
+	for _, expected := range []string{"playback_results", "event.succeeded", "INTERVAL '24 hours'", "INTERVAL '3 days'", "active_content", "error_message = 'not_found'"} {
 		if !strings.Contains(fake.execQuery, expected) {
 			t.Fatalf("active refresh query missing %q: %s", expected, fake.execQuery)
 		}
@@ -283,6 +284,31 @@ func TestPostgresMetadataRefreshQueueUsesUnifiedWorkerJobs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(fake.arguments, []any{5, embeddingBackfillPriority}) {
 		t.Fatalf("embedding backfill arguments = %#v", fake.arguments)
+	}
+}
+
+func TestAutomaticRefreshSkipsKnownMissingDoubanIDButManualRefreshCanRetry(t *testing.T) {
+	pool := testdb.Pool(t)
+	store := NewPostgresStore(pool)
+	if err := store.Upsert(t.Context(), Movie{DoubanID: "35185594", Title: "资源站占位", MetadataStatus: "partial"}); err != nil {
+		t.Fatal(err)
+	}
+	movie, err := store.FindByDoubanID(t.Context(), "35185594")
+	if err != nil || movie == nil {
+		t.Fatalf("movie/error = %+v/%v", movie, err)
+	}
+	if err := mediaidentity.NewPostgresStore(pool).WriteSourceSnapshot(t.Context(), movie.ID, "douban", []byte(`{}`), false, doubanNotFoundMarker); err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []string{RefreshProviderDouban, RefreshProviderReviews} {
+		jobID, err := store.EnqueueRefresh(t.Context(), "35185594", provider, RefreshReasonPartialMetadata, 0)
+		if err != nil || jobID != 0 {
+			t.Fatalf("automatic %s enqueue = %d/%v", provider, jobID, err)
+		}
+	}
+	jobID, err := store.EnqueueRefresh(t.Context(), "35185594", RefreshProviderDouban, "manual", 0)
+	if err != nil || jobID == 0 {
+		t.Fatalf("manual enqueue = %d/%v", jobID, err)
 	}
 }
 

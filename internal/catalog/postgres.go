@@ -92,6 +92,19 @@ func (store *PostgresStore) FindByDoubanID(ctx context.Context, doubanID string)
 	return &movie, nil
 }
 
+// DoubanMediaTypeHint 只读取详情抓取所需的类型提示；查不到时由抓取器使用默认顺序。
+func (store *PostgresStore) DoubanMediaTypeHint(ctx context.Context, doubanID string) (string, error) {
+	row := store.database.QueryRow(ctx, `SELECT media_type FROM media WHERE douban_id = $1 LIMIT 1`, doubanID)
+	if row == nil {
+		return "", nil
+	}
+	var mediaType string
+	if err := row.Scan(&mediaType); err != nil {
+		return "", err
+	}
+	return mediaType, nil
+}
+
 // FindByID 按 media.id 取一部影片，不存在时返回 (nil, nil)。
 func (store *PostgresStore) FindByID(ctx context.Context, id int) (*Movie, error) {
 	rows, err := store.database.Query(ctx, `SELECT `+movieColumns+` FROM media m WHERE m.id = $1 LIMIT 1`, id)

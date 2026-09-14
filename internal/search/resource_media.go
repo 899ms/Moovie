@@ -105,6 +105,7 @@ ON CONFLICT(media_id,field_name) DO UPDATE SET provider='resource',priority=10,v
 		_, err := store.database.Exec(ctx, `INSERT INTO worker_jobs(task_type,subject_key,payload,reason,status,available_at)
 SELECT 'douban_metadata',douban_id,jsonb_build_object('douban_id',douban_id),'resource_placeholder','pending',NOW()
 FROM media WHERE id=$1 AND douban_id ~ '^[0-9]{6,9}$' AND NOT EXISTS(SELECT 1 FROM media_source_snapshots WHERE media_id=media.id AND provider='douban' AND last_success_at IS NOT NULL)
+AND NOT EXISTS(SELECT 1 FROM media_source_snapshots WHERE media_id=media.id AND provider='douban' AND error_message='not_found')
 ON CONFLICT(task_type,subject_key) WHERE status IN ('pending','running') DO NOTHING`, mediaID)
 		if err != nil {
 			return err

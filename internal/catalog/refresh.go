@@ -57,6 +57,11 @@ type TMDBRefreshChecker interface {
 	NeedsTMDBRefresh(ctx context.Context, doubanID string) (bool, error)
 }
 
+// DoubanAvailabilityReader 读取已经由三个详情端点共同确认的无效豆瓣 ID。
+type DoubanAvailabilityReader interface {
+	DoubanNotFound(ctx context.Context, doubanID string) (bool, error)
+}
+
 // EnqueueRefresh 把一次资料刷新放进 worker_jobs。返回的 job id 为 0 表示被冷却挡下了，不是失败。
 func (store *PostgresStore) EnqueueRefresh(ctx context.Context, doubanID, provider, reason string, requestedBy int) (int, error) {
 	if !validDoubanID(doubanID) {
@@ -67,6 +72,15 @@ func (store *PostgresStore) EnqueueRefresh(ctx context.Context, doubanID, provid
 	}
 	if !validRefreshProvider(provider) {
 		return 0, workqueue.Terminal(fmt.Errorf("invalid metadata refresh provider %q", provider))
+	}
+	if reason != "manual" && (provider == RefreshProviderDouban || provider == RefreshProviderReviews) {
+		notFound, err := store.DoubanNotFound(ctx, doubanID)
+		if err != nil {
+			return 0, err
+		}
+		if notFound {
+			return 0, nil
+		}
 	}
 	if provider == RefreshProviderEmbedding {
 		movie, err := store.FindByDoubanID(ctx, doubanID)
@@ -94,6 +108,19 @@ func (store *PostgresStore) EnqueueRefresh(ctx context.Context, doubanID, provid
 		TaskType: provider, SubjectKey: doubanID, Payload: map[string]string{"douban_id": doubanID},
 		Reason: reason, RequestedBy: requestedBy, Priority: priority,
 	})
+}
+
+// DoubanNotFound 判断这个 ID 是否已经得到 movie/tv/show 全部 404 的持久结论。
+func (store *PostgresStore) DoubanNotFound(ctx context.Context, doubanID string) (bool, error) {
+	var notFound bool
+	if err := store.database.QueryRow(ctx, `SELECT EXISTS (
+    SELECT 1 FROM media_source_snapshots snapshot
+    JOIN media m ON m.id = snapshot.media_id
+    WHERE m.douban_id = $1 AND snapshot.provider = 'douban' AND snapshot.error_message = $2
+)`, doubanID, doubanNotFoundMarker).Scan(&notFound); err != nil {
+		return false, fmt.Errorf("check missing Douban identity: %w", err)
+	}
+	return notFound, nil
 }
 
 // coolingDown 判断这个对象最近是否已经跑完过一轮同类任务。只看终态行：
@@ -182,6 +209,8 @@ func (store *PostgresStore) ScheduleDueRefreshes(ctx context.Context, limit int)
     SELECT id, douban_id, (metadata_status = 'partial' OR completeness_score < 70) AS incomplete
     FROM media
     WHERE douban_id ~ '^[0-9]{6,9}$' AND next_refresh_at IS NOT NULL AND next_refresh_at <= NOW()
+	  AND NOT EXISTS (SELECT 1 FROM media_source_snapshots snapshot
+	      WHERE snapshot.media_id = media.id AND snapshot.provider = 'douban' AND snapshot.error_message = 'not_found')
     ORDER BY next_refresh_at, id LIMIT $1
 ), skip_complete AS (
     UPDATE media SET next_refresh_at = NULL
@@ -219,6 +248,8 @@ func (store *PostgresStore) ScheduleActiveContentRefreshes(ctx context.Context, 
     WHERE m.douban_id ~ '^[0-9]{6,9}$'
       AND (m.last_metadata_sync_at IS NULL OR m.last_metadata_sync_at < NOW() - INTERVAL '3 days')
       AND (m.metadata_status = 'partial' OR m.completeness_score < 70)
+	  AND NOT EXISTS (SELECT 1 FROM media_source_snapshots snapshot
+	      WHERE snapshot.media_id = m.id AND snapshot.provider = 'douban' AND snapshot.error_message = 'not_found')
 )
 INSERT INTO worker_jobs (task_type, subject_key, payload, reason, status, available_at)
 SELECT 'douban_metadata', douban_id, JSONB_BUILD_OBJECT('douban_id', douban_id), 'active_content', 'pending', NOW() FROM stale
