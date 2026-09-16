@@ -3,7 +3,7 @@
 <div class="admin-page">
     <!-- 页面标题和导航 -->
     <div class="admin-header">
-        <h1 class="admin-title">搜索数据管理</h1>
+        <h1 class="admin-title">数据管理</h1>
         <nav class="admin-tabs">
             <a href="/admin" class="admin-tab">概览</a>
             <a href="/admin/users" class="admin-tab">用户</a>
@@ -13,11 +13,104 @@
             <a href="/admin/jobs" class="admin-tab">任务队列</a>
             <a href="/admin/matches" class="admin-tab">匹配复核</a>
             <a href="/admin/collections" class="admin-tab">片单</a>
-            <a href="/admin/copyright" class="admin-tab">版权限制</a>
-            <a href="/admin/category" class="admin-tab">分类过滤</a>
-            <a href="/admin/nsfw" class="admin-tab">NSFW</a>
+            <a href="/admin/filters" class="admin-tab">内容过滤</a>
         </nav>
     </div>
+
+    <div class="admin-card">
+        <div class="admin-card-header">
+            <h3>Media 运维</h3>
+            <span class="badge">只读诊断与任务恢复</span>
+        </div>
+        <form class="admin-form" method="get" action="/admin/data">
+            <div class="form-row">
+                <div class="form-group flex-2">
+                    <label for="mediaQuery">豆瓣 ID 或标题</label>
+                    <input type="search" id="mediaQuery" name="q" value="{{ .MediaQuery }}" maxlength="100" placeholder="例如：1292052 或 肖申克">
+                </div>
+                <button class="btn btn-primary" type="submit">搜索 Media</button>
+            </div>
+        </form>
+        {{ if .MediaItems }}
+        <div class="admin-table-wrapper">
+            <table class="admin-table">
+                <thead><tr><th>媒体</th><th>资料</th><th>AI 状态</th><th>资源</th><th>操作</th></tr></thead>
+                <tbody>
+                {{ range .MediaItems }}
+                    <tr>
+                        <td><strong>{{ .Title }}</strong><div class="match-detail">#{{ .ID }} · 豆瓣 {{ if .DoubanID }}{{ .DoubanID }}{{ else }}—{{ end }} · {{ .MediaType }}</div></td>
+                        <td><span class="status-badge">{{ .MetadataStatus }}</span><div class="match-detail">完整度 {{ .CompletenessScore }} · 更新 {{ .UpdatedAt.Format "01-02 15:04" }}</div></td>
+                        <td>语义 {{ if .HasSemanticContent }}✓{{ else }}—{{ end }} · 向量 {{ if .HasEmbedding }}✓{{ else }}—{{ end }}</td>
+                        <td>{{ .ResourceCount }}</td>
+                        <td><a class="btn btn-secondary btn-sm" href="/admin/data?q={{ urlquery $.MediaQuery }}&amp;media_id={{ .ID }}">查看</a></td>
+                    </tr>
+                {{ end }}
+                </tbody>
+            </table>
+        </div>
+        {{ else if .MediaQuery }}
+        <div class="admin-card-body"><p class="description">没有找到匹配的 Media。</p></div>
+        {{ end }}
+    </div>
+
+    {{ with .SelectedMedia }}
+    <div class="admin-card">
+        <div class="admin-card-header">
+            <h3>{{ .Title }}{{ if .Year }}（{{ .Year }}）{{ end }}</h3>
+            {{ if .DoubanID }}<a class="btn btn-secondary btn-sm" href="/movie/{{ .DoubanID }}" target="_blank" rel="noopener">打开详情页</a>{{ end }}
+        </div>
+        <div class="admin-card-body">
+            <ul class="info-list">
+                <li><span class="info-label">身份</span><span class="info-value">Media #{{ .ID }} · 豆瓣 {{ if .DoubanID }}{{ .DoubanID }}{{ else }}—{{ end }} · {{ .MediaType }}</span></li>
+                <li><span class="info-label">资料状态</span><span class="info-value">{{ .MetadataStatus }} · 完整度 {{ .CompletenessScore }} · 关联资源 {{ .ResourceCount }} 条</span></li>
+                <li><span class="info-label">AI 状态</span><span class="info-value">语义文本 {{ if .HasSemanticContent }}已生成{{ else }}为空{{ end }} · 向量 {{ if .HasEmbedding }}已生成{{ else }}为空{{ end }}</span></li>
+                <li><span class="info-label">语义哈希</span><span class="info-value"><code>{{ if .SemanticHash }}{{ .SemanticHash }}{{ else }}—{{ end }}</code></span></li>
+                <li><span class="info-label">同步时间</span><span class="info-value">{{ if .LastMetadataSyncAt }}{{ .LastMetadataSyncAt.Format "2006-01-02 15:04:05" }}{{ else }}—{{ end }}{{ if .NextRefreshAt }} · 下次 {{ .NextRefreshAt.Format "2006-01-02 15:04:05" }}{{ end }}</span></li>
+                {{ if .Summary }}<li><span class="info-label">简介</span><span class="info-value">{{ .Summary }}</span></li>{{ end }}
+            </ul>
+            <div class="action-row">
+                <button class="btn btn-secondary" type="button" onclick="runMediaTask(this, {{ .ID }}, 'douban')" {{ if not .DoubanID }}disabled{{ end }}>重新抓取豆瓣</button>
+                <button class="btn btn-secondary" type="button" onclick="runMediaTask(this, {{ .ID }}, 'tmdb')" {{ if not .DoubanID }}disabled{{ end }}>重新抓取 TMDB</button>
+                <button class="btn btn-secondary" type="button" onclick="runMediaTask(this, {{ .ID }}, 'semantic')" {{ if or (eq .MetadataStatus "partial") (lt .CompletenessScore 70) }}disabled{{ end }}>重新生成语义文本</button>
+                <button class="btn btn-secondary" type="button" onclick="runMediaTask(this, {{ .ID }}, 'embedding')" {{ if not .HasSemanticContent }}disabled{{ end }}>重新生成向量</button>
+            </div>
+            <p class="description">重新生成语义文本时，旧向量会继续服务；新文本保存后才会清空旧向量并创建向量任务。</p>
+            <div id="mediaTaskResult" class="result-message"></div>
+        </div>
+    </div>
+
+    <div class="admin-card">
+        <div class="admin-card-header"><h3>外部 ID 与数据来源</h3></div>
+        <div class="admin-table-wrapper">
+            <table class="admin-table">
+                <thead><tr><th>类型</th><th>标识/状态</th><th>时间</th><th>错误</th></tr></thead>
+                <tbody>
+                {{ range .ExternalIDs }}
+                    <tr><td>外部 ID · {{ .Provider }}</td><td><code>{{ .ExternalType }} / {{ .ExternalID }}</code></td><td>—</td><td>—</td></tr>
+                {{ end }}
+                {{ range .Sources }}
+                    <tr><td>来源快照 · {{ .Provider }}</td><td>连续未变化 {{ .UnchangedCount }} 次</td><td>{{ .FetchedAt.Format "2006-01-02 15:04:05" }}</td><td>{{ if .ErrorMessage }}{{ .ErrorMessage }}{{ else }}—{{ end }}</td></tr>
+                {{ end }}
+                {{ if and (not .ExternalIDs) (not .Sources) }}<tr><td colspan="4" class="empty-cell">暂无外部 ID 或来源快照</td></tr>{{ end }}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="admin-card">
+        <div class="admin-card-header"><h3>最近任务</h3><a href="/admin/jobs" class="btn btn-secondary btn-sm">全部任务</a></div>
+        <div class="admin-table-wrapper">
+            <table class="admin-table">
+                <thead><tr><th>任务</th><th>状态</th><th>尝试</th><th>更新时间</th><th>错误</th></tr></thead>
+                <tbody>
+                {{ range .Jobs }}
+                    <tr><td>#{{ .ID }} · {{ jobType .TaskType }}<div class="match-detail">{{ jobReason .Reason }}</div></td><td><span class="status-badge status-{{ .Status }}">{{ .Status }}</span></td><td>{{ .AttemptCount }}/{{ .MaxAttempts }}</td><td>{{ .UpdatedAt.Format "2006-01-02 15:04:05" }}</td><td>{{ if .ErrorMessage }}{{ .ErrorMessage }}{{ else }}—{{ end }}</td></tr>
+                {{ else }}<tr><td colspan="5" class="empty-cell">暂无任务</td></tr>{{ end }}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {{ end }}
 
     <!-- 数据清理 -->
     <div class="admin-card">
@@ -86,6 +179,33 @@
 </div>
 
 <script>
+async function runMediaTask(button, mediaID, action) {
+    const labels = { douban: '重新抓取豆瓣资料', tmdb: '重新抓取 TMDB 资料', semantic: '重新生成语义文本', embedding: '重新生成向量' };
+    if (!confirm('确认' + labels[action] + '？操作会创建后台任务。')) return;
+    const resultDiv = document.getElementById('mediaTaskResult');
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = '正在创建…';
+    try {
+        const body = new URLSearchParams({ media_id: String(mediaID), action });
+        const resp = await fetch('/admin/data/media-task', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.success) throw new Error(data.message || '创建任务失败');
+        resultDiv.textContent = '✓ 已创建任务 #' + data.data.job_id;
+        resultDiv.className = 'result-message success';
+        window.setTimeout(() => window.location.reload(), 600);
+    } catch (err) {
+        resultDiv.textContent = '✗ ' + err.message;
+        resultDiv.className = 'result-message error';
+        button.disabled = false;
+        button.textContent = original;
+    }
+}
+
 async function cleanInactiveData() {
     const resultDiv = document.getElementById('cleanResult');
     resultDiv.textContent = '正在清理...';

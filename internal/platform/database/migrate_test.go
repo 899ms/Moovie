@@ -17,7 +17,7 @@ func TestEmbeddedMigrationsIncludeCanonicalCutover(t *testing.T) {
 	for _, migration := range migrations {
 		versions = append(versions, migration.version)
 	}
-	expectedVersions := make([]string, 66)
+	expectedVersions := make([]string, 67)
 	for index := range expectedVersions {
 		expectedVersions[index] = fmt.Sprintf("%04d", index+1)
 	}
@@ -31,6 +31,11 @@ func TestEmbeddedMigrationsIncludeCanonicalCutover(t *testing.T) {
 	for _, required := range []string{"CREATE TABLE SITES", "CREATE TABLE VOD_ITEMS", "CREATE TABLE COPYRIGHT_FILTERS", "CREATE TABLE CATEGORY_FILTERS", "CREATE TABLE SEARCH_LOGS", "CREATE TABLE SITE_STATS", "CREATE TABLE WATCH_HISTORIES", "CREATE TABLE USERS", "CREATE TABLE USER_MOVIES", "CREATE TABLE MOVIES", "CREATE TABLE DOUBAN_SYNC_JOBS", "CREATE TABLE MONTHLY_REPORTS", "CREATE TABLE COMMENT_LIKES", "CREATE TABLE COMMENT_REPLIES", "CREATE TABLE SOCIAL_NOTIFICATIONS", "CREATE TABLE FEEDBACKS", "CREATE TABLE DANMAKUS", "CREATE TABLE IF NOT EXISTS MEDIA_FIELD_SOURCES", "ALTER TABLE VOD_ITEMS ADD COLUMN IF NOT EXISTS RESOURCE_STATUS", "CREATE TABLE IF NOT EXISTS RESOURCE_PLAYBACK_HEALTH", "CREATE TABLE IF NOT EXISTS HISTORY_SYNC_EVENTS", "CREATE TABLE USER_RECOMMENDATION_SNAPSHOTS", "PLAYBACK_ATTEMPT_EVENTS_TRENDING_IDX"} {
 		if !strings.Contains(upperSQL, required) {
 			t.Fatalf("migration missing %q", required)
+		}
+	}
+	for _, required := range []string{"CREATE TABLE CONTENT_FILTERS", "CONTENT_FILTERS_KEYWORD_LENGTH", "CONTENT_FILTERS_HAS_ACTION", "CONTENT_FILTERS_KEYWORD_NORMALIZED_UNIQUE"} {
+		if !strings.Contains(upperSQL, required) {
+			t.Fatalf("content filter migration missing %q", required)
 		}
 	}
 	if !strings.Contains(upperSQL, "'系统告警'") {

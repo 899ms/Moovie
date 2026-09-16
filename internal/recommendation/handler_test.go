@@ -276,7 +276,10 @@ func seedEmbedding(t *testing.T, store *catalog.PostgresStore, doubanID string) 
 	t.Helper()
 	vector := make([]float32, 768)
 	vector[len(doubanID)%768] = 0.5
-	if err := store.UpdateEmbedding(t.Context(), doubanID, "seed", vector); err != nil {
+	if saved, err := store.SaveSemanticContent(t.Context(), doubanID, "", "seed"); err != nil || !saved {
+		t.Fatalf("seed semantic content %s: %v/%v", doubanID, saved, err)
+	}
+	if updated, err := store.UpdateEmbedding(t.Context(), doubanID, "seed", vector); err != nil || !updated {
 		t.Fatalf("seed embedding %s: %v", doubanID, err)
 	}
 }

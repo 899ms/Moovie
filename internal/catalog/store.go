@@ -16,6 +16,7 @@ type Store interface {
 	Suggest(ctx context.Context, keyword string, limit int) ([]Movie, error)
 	ClaimSearchDiscovery(ctx context.Context, keyword string, cooldown time.Duration) (bool, error)
 	Popular(ctx context.Context, limit int) ([]Movie, error)
-	UpdateEmbedding(ctx context.Context, doubanID, content string, embedding []float32) error
+	SaveSemanticContent(ctx context.Context, doubanID, semanticHash, content string) (bool, error)
+	UpdateEmbedding(ctx context.Context, doubanID, content string, embedding []float32) (bool, error)
 	Count(ctx context.Context) (int, error)
 }

@@ -31,8 +31,8 @@ type EmbeddingConfig struct {
 	CFAIModel    string
 }
 
-// EmbeddingService 给影片生成语义向量，供「相似推荐」和「猜你喜欢」使用。
-// 流程：元数据 →（可选）AI 改写成高密度描述 → Ollama 生成 768 维向量 → 写回 media.embedding。
+// EmbeddingService 给影片生成语义文本和向量。两步分开执行，
+// Ollama 或数据库失败时只重试向量，不会重新消耗 AI Gateway。
 type EmbeddingService struct {
 	client *http.Client
 	// aiClient 专供 AI Gateway。它必须和抓取用的 Client 分开：后者的超时是按搜索源
@@ -76,20 +76,26 @@ func NewEmbeddingService(client *http.Client, store Store, cfg EmbeddingConfig, 
 	return service
 }
 
-// Enrich 为一部影片生成向量，同一条目的并发调用会被合并成一次。
+// Enrich 是同步便利入口；Worker 生产路径分别调用下面两个阶段。
 func (service *EmbeddingService) Enrich(ctx context.Context, doubanID string) error {
-	_, err, _ := service.group.Do(doubanID, func() (any, error) {
-		return nil, service.enrich(ctx, doubanID)
+	if err := service.GenerateSemanticContent(ctx, doubanID); err != nil {
+		return err
+	}
+	return service.GenerateEmbedding(ctx, doubanID)
+}
+
+// GenerateSemanticContent 只调 Gateway（或本地元数据兜底）并持久化文本。
+func (service *EmbeddingService) GenerateSemanticContent(ctx context.Context, doubanID string) error {
+	_, err, _ := service.group.Do("semantic:"+doubanID, func() (any, error) {
+		return nil, service.generateAndSaveSemanticContent(ctx, doubanID)
 	})
 	return err
 }
 
-// enrich 为一部影片生成语义向量。元数据是否变化由上游（updateRefreshState）判断，
-// 这里只管拿到当前元数据、调 AI 改写、生成向量、写回。
-func (service *EmbeddingService) enrich(ctx context.Context, doubanID string) error {
+func (service *EmbeddingService) generateAndSaveSemanticContent(ctx context.Context, doubanID string) error {
 	movie, err := service.store.FindByDoubanID(ctx, doubanID)
 	if err != nil {
-		return fmt.Errorf("find movie for embedding: %w", err)
+		return fmt.Errorf("find movie for semantic content: %w", err)
 	}
 	if movie == nil {
 		return fmt.Errorf("movie not found: %s", doubanID)
@@ -98,8 +104,37 @@ func (service *EmbeddingService) enrich(ctx context.Context, doubanID string) er
 		return fmt.Errorf("movie metadata incomplete for embedding: %s (status=%s, completeness=%d)",
 			doubanID, movie.MetadataStatus, movie.CompletenessScore)
 	}
+	if strings.TrimSpace(movie.EmbeddingContent) != "" {
+		return nil
+	}
 	metadata := strings.TrimSpace(embeddingInput(*movie))
 	content := service.semanticContent(ctx, *movie, metadata)
+	if _, err := service.store.SaveSemanticContent(ctx, doubanID, movie.semanticHash, content); err != nil {
+		return fmt.Errorf("persist semantic content: %w", err)
+	}
+	return nil
+}
+
+// GenerateEmbedding 只把已持久化的语义文本送给 Ollama。
+func (service *EmbeddingService) GenerateEmbedding(ctx context.Context, doubanID string) error {
+	_, err, _ := service.group.Do("embedding:"+doubanID, func() (any, error) {
+		return nil, service.generateAndSaveEmbedding(ctx, doubanID)
+	})
+	return err
+}
+
+func (service *EmbeddingService) generateAndSaveEmbedding(ctx context.Context, doubanID string) error {
+	movie, err := service.store.FindByDoubanID(ctx, doubanID)
+	if err != nil {
+		return fmt.Errorf("find movie for embedding: %w", err)
+	}
+	if movie == nil {
+		return fmt.Errorf("movie not found: %s", doubanID)
+	}
+	content := strings.TrimSpace(movie.EmbeddingContent)
+	if content == "" || len(movie.Embedding) > 0 {
+		return nil
+	}
 	vector, err := service.generateVector(ctx, content)
 	if err != nil {
 		return err
@@ -107,7 +142,7 @@ func (service *EmbeddingService) enrich(ctx context.Context, doubanID string) er
 	if len(vector) != embeddingDimensions {
 		return fmt.Errorf("embedding dimension mismatch: want %d, got %d", embeddingDimensions, len(vector))
 	}
-	if err := service.store.UpdateEmbedding(ctx, doubanID, content, vector); err != nil {
+	if _, err := service.store.UpdateEmbedding(ctx, doubanID, content, vector); err != nil {
 		return fmt.Errorf("persist embedding: %w", err)
 	}
 	return nil

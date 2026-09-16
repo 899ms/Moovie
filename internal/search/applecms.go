@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"strings"
 
 	"github.com/TwoThreeWang/Moovie/new/internal/platform/outbound"
 )
@@ -38,8 +37,8 @@ type appleCMSResponse struct {
 }
 
 // Search 向单个资源站发起搜索。目标地址会先做公网校验（防 SSRF），
-// 没有播放地址或命中分类屏蔽词的条目直接丢弃。
-func (crawler *AppleCMSCrawler) Search(ctx context.Context, baseURL, keyword, sourceKey string, restrictedCategories []string) ([]VodItem, error) {
+// 没有播放地址或命中禁止采集规则的条目直接丢弃。
+func (crawler *AppleCMSCrawler) Search(ctx context.Context, baseURL, keyword, sourceKey string, blockedKeywords []string) ([]VodItem, error) {
 	target := fmt.Sprintf("%s?ac=videolist&pg=1&wd=%s", baseURL, url.QueryEscape(keyword))
 	if err := outbound.ValidatePublicHTTPURL(target); err != nil {
 		return nil, fmt.Errorf("source endpoint is not public: %w", err)
@@ -66,7 +65,7 @@ func (crawler *AppleCMSCrawler) Search(ctx context.Context, baseURL, keyword, so
 	items := make([]VodItem, 0, len(payload.List))
 	for _, raw := range payload.List {
 		item := mapAppleCMSItem(raw, sourceKey)
-		if item.VodPlayUrl == "" || ingestBlocked(item, restrictedCategories) {
+		if item.VodPlayUrl == "" || ingestBlocked(item, blockedKeywords) {
 			continue
 		}
 		items = append(items, item)
@@ -124,37 +123,29 @@ func decodeAppleCMSResponse(reader io.Reader, destination *appleCMSResponse) err
 	return nil
 }
 
-// categoryBlocked 判断分类名是否命中屏蔽词（如伦理片等不予收录的分类）。
-func categoryBlocked(typeName string, restricted []string) bool {
-	for _, keyword := range restricted {
-		if strings.Contains(typeName, keyword) {
-			return true
-		}
-	}
-	return false
-}
-
-// ingestBlockedKeywords 是固定不予收录的关键词。后台维护的分类屏蔽词只看分类名，
-// 而解说类资源经常分类写「电影」、标题才带「电影解说」，所以这份列表标题也要看。
+// ingestBlockedKeywords 是无需后台配置、固定不予收录的关键词。
 var ingestBlockedKeywords = []string{"影视解说", "电影解说"}
 
 // telecineRelease 匹配 TC（枪版）标记，通常出现在备注里，如「TC」「HD-TC」「TC抢先版」。
 // 前后必须不是英文字母，否则 catch、watch 这类词里的 tc 会被误伤。
 var telecineRelease = regexp.MustCompile(`(?i)(^|[^a-z])tc([^a-z]|$)`)
 
-// ingestBlocked 判断一条资源是否不予收录。除了后台维护的分类屏蔽词（只匹配分类名），
-// 解说和 TC 枪版这两类固定规则要把标题、分类、备注一起看。
-// 拦在抓取阶段，这些条目既不会写进 vod_items，也不会出现在搜索结果里。
-func ingestBlocked(item VodItem, restricted []string) bool {
-	if categoryBlocked(item.TypeName, restricted) {
-		return true
+// ingestBlocked 判断一条资源是否不予收录。后台规则只匹配标题、分类和标签；
+// TC 固定规则额外检查备注。拦在抓取阶段，不追溯处理已有 vod_items。
+func ingestBlocked(item VodItem, blockedKeywords []string) bool {
+	for _, field := range []string{item.VodName, item.VodSub, item.VodEn, item.TypeName, item.VodClass, item.VodTag} {
+		for _, keyword := range blockedKeywords {
+			if matchesKeyword(field, keyword) {
+				return true
+			}
+		}
 	}
 	for _, field := range []string{item.VodName, item.TypeName, item.VodClass, item.VodRemarks} {
 		if telecineRelease.MatchString(field) {
 			return true
 		}
 		for _, keyword := range ingestBlockedKeywords {
-			if strings.Contains(field, keyword) {
+			if matchesKeyword(field, keyword) {
 				return true
 			}
 		}

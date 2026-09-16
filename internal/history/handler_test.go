@@ -14,8 +14,37 @@ import (
 	"github.com/TwoThreeWang/Moovie/new/internal/platform/auth"
 	"github.com/TwoThreeWang/Moovie/new/internal/platform/database/testdb"
 	platformweb "github.com/TwoThreeWang/Moovie/new/internal/platform/web"
+	"github.com/TwoThreeWang/Moovie/new/internal/search"
 	"github.com/gin-gonic/gin"
 )
+
+type sensitiveReaderStub []string
+
+func (reader sensitiveReaderStub) SensitiveKeywords(context.Context) ([]string, error) {
+	return []string(reader), nil
+}
+
+func TestMarkSensitiveMatchesTitleGenresAndResourceTags(t *testing.T) {
+	pool := testdb.Pool(t)
+	resourceStore := search.NewPostgresStore(pool)
+	if _, err := resourceStore.CreateSite(t.Context(), search.Site{Key: "source", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := resourceStore.Upsert(t.Context(), search.VodItem{SourceKey: "source", VodId: "tagged", VodName: "普通影片", VodTag: "Adult", VodPlayUrl: "正片$https://video.example/main.m3u8"}); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(NewPostgresStore(pool), "secret", WithSensitiveKeywordReader(sensitiveReaderStub{"情色", "adult"}))
+	records := []Record{
+		{Title: "情色电影"},
+		{Title: "普通电影", Genres: "情色"},
+		{Title: "普通电影", Source: "source", VodID: "tagged"},
+		{Title: "女性成长", Genres: "剧情"},
+	}
+	handler.markSensitive(t.Context(), records)
+	if !records[0].Sensitive || !records[1].Sensitive || !records[2].Sensitive || records[3].Sensitive {
+		t.Fatalf("sensitive records = %+v", records)
+	}
+}
 
 func TestLegacyHistoryRoutesAreRemoved(t *testing.T) {
 	router, _ := historyTestRouter(t)

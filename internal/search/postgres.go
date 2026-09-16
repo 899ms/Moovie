@@ -57,6 +57,12 @@ func (store *PostgresStore) Trending(ctx context.Context, hours, limit int) ([]T
 SELECT keyword, COUNT(*) AS count, MAX(created_at) AS last_searched_at
 FROM search_logs
 WHERE created_at > NOW() - INTERVAL '1 hour' * $1
+  AND NOT EXISTS (
+      SELECT 1
+      FROM content_filters filter
+      WHERE filter.sensitive
+        AND LOWER(search_logs.keyword) LIKE '%' || LOWER(BTRIM(filter.keyword)) || '%'
+  )
 GROUP BY keyword
 ORDER BY count DESC
 LIMIT $2`, hours, limit)
@@ -391,17 +397,22 @@ func (store *PostgresStore) FindSiteByKey(ctx context.Context, key string) (*Sit
 	return &site, nil
 }
 
-// CopyrightKeywords 取版权屏蔽词。
+// CopyrightKeywords 取版权限制关键词，只由标题匹配逻辑消费。
 func (store *PostgresStore) CopyrightKeywords(ctx context.Context) ([]string, error) {
-	return store.keywords(ctx, `SELECT keyword FROM copyright_filters`)
+	return store.keywords(ctx, `SELECT keyword FROM content_filters WHERE copyright_restricted ORDER BY id`)
 }
 
-// CategoryKeywords 取分类屏蔽词（抓取阶段就丢弃这些分类）。
-func (store *PostgresStore) CategoryKeywords(ctx context.Context) ([]string, error) {
-	return store.keywords(ctx, `SELECT keyword FROM category_filters`)
+// IngestBlockedKeywords 取禁止采集关键词，抓取阶段会匹配资源标题、分类和标签。
+func (store *PostgresStore) IngestBlockedKeywords(ctx context.Context) ([]string, error) {
+	return store.keywords(ctx, `SELECT keyword FROM content_filters WHERE block_ingest ORDER BY id`)
 }
 
-// keywords 是上面两个方法的公共查询。
+// SensitiveKeywords 取敏感内容关键词，用于观看记录封面模糊化。
+func (store *PostgresStore) SensitiveKeywords(ctx context.Context) ([]string, error) {
+	return store.keywords(ctx, `SELECT keyword FROM content_filters WHERE sensitive ORDER BY id`)
+}
+
+// keywords 是上面三个用途读取方法的公共查询。
 func (store *PostgresStore) keywords(ctx context.Context, query string) ([]string, error) {
 	rows, err := store.database.Query(ctx, query)
 	if err != nil {
@@ -532,92 +543,48 @@ WHERE v.resource_status = 'stale'
 	return int(affected), err
 }
 
-// 下面几个方法是后台管理屏蔽词用的增删改查。
-func (store *PostgresStore) ListCopyrightFilters(ctx context.Context) ([]Filter, error) {
-	return store.listFilters(ctx, `SELECT id, keyword, created_at, updated_at FROM copyright_filters ORDER BY id`)
-}
-
-// CreateCopyrightFilter 新增版权屏蔽词。
-func (store *PostgresStore) CreateCopyrightFilter(ctx context.Context, keyword string) (*Filter, error) {
-	return store.createFilter(ctx, "copyright_filters", keyword)
-}
-
-// UpdateCopyrightFilter 修改版权屏蔽词。
-func (store *PostgresStore) UpdateCopyrightFilter(ctx context.Context, id uint, keyword string) error {
-	_, err := store.database.Exec(ctx, `UPDATE copyright_filters SET keyword = $2, updated_at = NOW() WHERE id = $1`, id, keyword)
-	return err
-}
-
-// DeleteCopyrightFilter 删除版权屏蔽词。
-func (store *PostgresStore) DeleteCopyrightFilter(ctx context.Context, id uint) error {
-	_, err := store.database.Exec(ctx, `DELETE FROM copyright_filters WHERE id = $1`, id)
-	return err
-}
-
-// ListCategoryFilters 列出分类屏蔽词。
-func (store *PostgresStore) ListCategoryFilters(ctx context.Context) ([]Filter, error) {
-	return store.listFilters(ctx, `SELECT id, keyword, created_at, updated_at FROM category_filters ORDER BY id`)
-}
-
-// CreateCategoryFilter 新增分类屏蔽词。
-func (store *PostgresStore) CreateCategoryFilter(ctx context.Context, keyword string) (*Filter, error) {
-	return store.createFilter(ctx, "category_filters", keyword)
-}
-
-// DeleteCategoryFilter 删除分类屏蔽词。
-func (store *PostgresStore) DeleteCategoryFilter(ctx context.Context, id uint) error {
-	_, err := store.database.Exec(ctx, `DELETE FROM category_filters WHERE id = $1`, id)
-	return err
-}
-
-// ListNSFWFilters 列出 NSFW 标签关键词。
-func (store *PostgresStore) ListNSFWFilters(ctx context.Context) ([]Filter, error) {
-	return store.listFilters(ctx, `SELECT id, keyword, created_at, updated_at FROM nsfw_filters ORDER BY id`)
-}
-
-// CreateNSFWFilter 新增 NSFW 标签关键词。
-func (store *PostgresStore) CreateNSFWFilter(ctx context.Context, keyword string) (*Filter, error) {
-	return store.createFilter(ctx, "nsfw_filters", keyword)
-}
-
-// DeleteNSFWFilter 删除 NSFW 标签关键词。
-func (store *PostgresStore) DeleteNSFWFilter(ctx context.Context, id uint) error {
-	_, err := store.database.Exec(ctx, `DELETE FROM nsfw_filters WHERE id = $1`, id)
-	return err
-}
-
-// NSFWKeywords 取 NSFW 标签关键词（首页继续观看海报模糊化）。
-func (store *PostgresStore) NSFWKeywords(ctx context.Context) ([]string, error) {
-	return store.keywords(ctx, `SELECT keyword FROM nsfw_filters`)
-}
-
-// listFilters 是两类屏蔽词的公共查询。
-func (store *PostgresStore) listFilters(ctx context.Context, query string) ([]Filter, error) {
-	rows, err := store.database.Query(ctx, query)
+// ListContentFilters 列出统一内容过滤规则。
+func (store *PostgresStore) ListContentFilters(ctx context.Context) ([]ContentFilter, error) {
+	rows, err := store.database.Query(ctx, `SELECT id, keyword, block_ingest, copyright_restricted,
+sensitive, created_at, updated_at FROM content_filters ORDER BY id`)
 	if err != nil {
-		return nil, fmt.Errorf("list filters: %w", err)
+		return nil, fmt.Errorf("list content filters: %w", err)
 	}
 	defer rows.Close()
-	filters := make([]Filter, 0)
+	filters := make([]ContentFilter, 0)
 	for rows.Next() {
-		var filter Filter
-		if err := rows.Scan(&filter.ID, &filter.Keyword, &filter.CreatedAt, &filter.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan filter: %w", err)
+		var filter ContentFilter
+		if err := rows.Scan(&filter.ID, &filter.Keyword, &filter.BlockIngest, &filter.CopyrightRestricted,
+			&filter.Sensitive, &filter.CreatedAt, &filter.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan content filter: %w", err)
 		}
 		filters = append(filters, filter)
 	}
 	return filters, rows.Err()
 }
 
-// createFilter 表名是拼进 SQL 的，因此这里用白名单校验，杜绝注入。
-func (store *PostgresStore) createFilter(ctx context.Context, table, keyword string) (*Filter, error) {
-	if table != "copyright_filters" && table != "category_filters" && table != "nsfw_filters" {
-		return nil, fmt.Errorf("unsupported filter table")
+// CreateContentFilter 新增一条内容过滤规则。
+func (store *PostgresStore) CreateContentFilter(ctx context.Context, filter ContentFilter) (*ContentFilter, error) {
+	filter.CreatedAt, filter.UpdatedAt = time.Now(), time.Now()
+	if err := store.database.QueryRow(ctx, `INSERT INTO content_filters
+(keyword, block_ingest, copyright_restricted, sensitive, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, filter.Keyword, filter.BlockIngest, filter.CopyrightRestricted,
+		filter.Sensitive, filter.CreatedAt, filter.UpdatedAt).Scan(&filter.ID); err != nil {
+		return nil, fmt.Errorf("create content filter: %w", err)
 	}
-	filter := &Filter{Keyword: keyword, CreatedAt: time.Now(), UpdatedAt: time.Now()}
-	query := `INSERT INTO ` + table + ` (keyword, created_at, updated_at) VALUES ($1,$2,$3) RETURNING id`
-	if err := store.database.QueryRow(ctx, query, keyword, filter.CreatedAt, filter.UpdatedAt).Scan(&filter.ID); err != nil {
-		return nil, fmt.Errorf("create filter: %w", err)
-	}
-	return filter, nil
+	return &filter, nil
+}
+
+// UpdateContentFilter 同时更新关键词和三个用途，避免拆成多条半完成规则。
+func (store *PostgresStore) UpdateContentFilter(ctx context.Context, filter ContentFilter) error {
+	_, err := store.database.Exec(ctx, `UPDATE content_filters SET keyword=$2, block_ingest=$3,
+copyright_restricted=$4, sensitive=$5, updated_at=NOW() WHERE id=$1`, filter.ID, filter.Keyword,
+		filter.BlockIngest, filter.CopyrightRestricted, filter.Sensitive)
+	return err
+}
+
+// DeleteContentFilter 删除内容过滤规则；规则不保留停用状态。
+func (store *PostgresStore) DeleteContentFilter(ctx context.Context, id uint) error {
+	_, err := store.database.Exec(ctx, `DELETE FROM content_filters WHERE id=$1`, id)
+	return err
 }

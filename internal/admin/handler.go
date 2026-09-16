@@ -1,6 +1,6 @@
 // Package admin 是管理后台，只有 role=admin 的账号能访问。
 //
-// 本包自己不建表，全部通过其他包的接口读写：用户、资源网、版权/分类过滤词、
+// 本包自己不建表，全部通过其他包的接口读写：用户、资源网、内容过滤规则、
 // 任务队列、运行指标、资源匹配复核、资源退役。
 //
 // 页面接口返回 HTML，操作接口统一返回 {code, message, data, success} 的 JSON。
@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TwoThreeWang/Moovie/new/internal/catalog"
 	"github.com/TwoThreeWang/Moovie/new/internal/feedback"
 	"github.com/TwoThreeWang/Moovie/new/internal/identity"
 	"github.com/TwoThreeWang/Moovie/new/internal/operations"
@@ -41,17 +42,16 @@ type SearchStore interface {
 	UpdateSite(ctx context.Context, site search.Site) error
 	DeleteSite(ctx context.Context, id uint) error
 	DeleteInactive(ctx context.Context, days int) (int, error)
-	ListCopyrightFilters(ctx context.Context) ([]search.Filter, error)
-	CreateCopyrightFilter(ctx context.Context, keyword string) (*search.Filter, error)
-	UpdateCopyrightFilter(ctx context.Context, id uint, keyword string) error
-	DeleteCopyrightFilter(ctx context.Context, id uint) error
-	ListCategoryFilters(ctx context.Context) ([]search.Filter, error)
-	CreateCategoryFilter(ctx context.Context, keyword string) (*search.Filter, error)
-	DeleteCategoryFilter(ctx context.Context, id uint) error
-	ListNSFWFilters(ctx context.Context) ([]search.Filter, error)
-	CreateNSFWFilter(ctx context.Context, keyword string) (*search.Filter, error)
-	DeleteNSFWFilter(ctx context.Context, id uint) error
+	ListContentFilters(ctx context.Context) ([]search.ContentFilter, error)
+	CreateContentFilter(ctx context.Context, filter search.ContentFilter) (*search.ContentFilter, error)
+	UpdateContentFilter(ctx context.Context, filter search.ContentFilter) error
+	DeleteContentFilter(ctx context.Context, id uint) error
 	SummaryHealthSince(ctx context.Context, since time.Time) (map[string]*search.HealthSummary, error)
+}
+
+// TrendCacheInvalidator 在敏感内容规则变化后清除热搜缓存。
+type TrendCacheInvalidator interface {
+	InvalidateTrendCache()
 }
 
 // CircuitState 用于在资源网列表上显示熔断状态。
@@ -62,6 +62,15 @@ type CircuitState interface {
 // MovieCounter 用于首页统计影片数量。
 type MovieCounter interface {
 	Count(ctx context.Context) (int, error)
+}
+
+// MediaManager 是后台媒体诊断与恢复所需的最小能力。
+type MediaManager interface {
+	SearchAdminMedia(ctx context.Context, keyword string, limit int) ([]catalog.AdminMedia, error)
+	FindAdminMedia(ctx context.Context, mediaID int) (*catalog.AdminMedia, error)
+	EnqueueRefresh(ctx context.Context, doubanID, provider, reason string, requestedBy int) (int, error)
+	RegenerateSemanticContent(ctx context.Context, mediaID, requestedBy int) (int, error)
+	RegenerateEmbedding(ctx context.Context, mediaID, requestedBy int) (int, error)
 }
 
 // FeedbackCounter 用于首页统计待处理反馈数量。
@@ -88,6 +97,8 @@ type Handler struct {
 	health   CircuitState
 	metrics  operations.MetricsReader
 	jobs     JobRetrier
+	media    MediaManager
+	trends   TrendCacheInvalidator
 }
 
 // HandlerOption 用于注入可选依赖。
@@ -101,6 +112,16 @@ func WithMetricsReader(reader operations.MetricsReader) HandlerOption {
 // WithJobRetrier 注入任务重试能力。
 func WithJobRetrier(retrier JobRetrier) HandlerOption {
 	return func(handler *Handler) { handler.jobs = retrier }
+}
+
+// WithMediaManager 启用数据管理页里的媒体诊断与恢复操作。
+func WithMediaManager(manager MediaManager) HandlerOption {
+	return func(handler *Handler) { handler.media = manager }
+}
+
+// WithTrendCacheInvalidator 注入热搜缓存失效能力。
+func WithTrendCacheInvalidator(invalidator TrendCacheInvalidator) HandlerOption {
+	return func(handler *Handler) { handler.trends = invalidator }
 }
 
 // NewHandler 创建后台处理器。
@@ -126,6 +147,7 @@ func (handler *Handler) Register(router *gin.Engine) {
 	router.DELETE("/admin/sites/:id", append(middleware, handler.siteDelete)...)
 	router.GET("/admin/sites/:id/test", append(middleware, handler.siteTest)...)
 	router.GET("/admin/data", append(middleware, handler.dataPage)...)
+	router.POST("/admin/data/media-task", append(middleware, handler.mediaTask)...)
 	router.GET("/admin/jobs", append(middleware, handler.jobQueuePage)...)
 	router.POST("/admin/jobs/retry", append(middleware, handler.jobRetry)...)
 	router.POST("/admin/jobs/retry-failed", append(middleware, handler.jobRetryFailed)...)
@@ -135,16 +157,10 @@ func (handler *Handler) Register(router *gin.Engine) {
 	router.POST("/api/v2/admin/media-matches/:id/resolve", append(middleware, handler.matchReviewAPIResolve)...)
 	router.GET("/api/v2/admin/metrics", append(middleware, handler.metricsSnapshot)...)
 	router.POST("/admin/data/clean", append(middleware, handler.dataClean)...)
-	router.GET("/admin/copyright", append(middleware, handler.copyrightList)...)
-	router.POST("/admin/copyright", append(middleware, handler.copyrightCreate)...)
-	router.PUT("/admin/copyright/:id", append(middleware, handler.copyrightUpdate)...)
-	router.DELETE("/admin/copyright/:id", append(middleware, handler.copyrightDelete)...)
-	router.GET("/admin/category", append(middleware, handler.categoryList)...)
-	router.POST("/admin/category", append(middleware, handler.categoryCreate)...)
-	router.DELETE("/admin/category/:id", append(middleware, handler.categoryDelete)...)
-	router.GET("/admin/nsfw", append(middleware, handler.nsfwList)...)
-	router.POST("/admin/nsfw", append(middleware, handler.nsfwCreate)...)
-	router.DELETE("/admin/nsfw/:id", append(middleware, handler.nsfwDelete)...)
+	router.GET("/admin/filters", append(middleware, handler.contentFilterList)...)
+	router.POST("/admin/filters", append(middleware, handler.contentFilterCreate)...)
+	router.PUT("/admin/filters/:id", append(middleware, handler.contentFilterUpdate)...)
+	router.DELETE("/admin/filters/:id", append(middleware, handler.contentFilterDelete)...)
 }
 
 // jobQueuePage 渲染任务队列页，按状态筛选、按游标翻页。
@@ -538,9 +554,84 @@ type siteTestPreview struct {
 	UpdatedAt string `json:"vod_time"`
 }
 
-// dataPage 渲染搜索数据管理页。
+// dataPage 渲染搜索数据与规范媒体运维页。
 func (handler *Handler) dataPage(c *gin.Context) {
-	handler.page(c, "admin_cache.html", "搜索数据管理 - Moovie影牛", nil)
+	query := strings.TrimSpace(c.Query("q"))
+	data := gin.H{"MediaQuery": query}
+	if handler.media != nil {
+		if query != "" {
+			items, err := handler.media.SearchAdminMedia(c.Request.Context(), query, 20)
+			if err != nil {
+				c.String(http.StatusInternalServerError, "读取媒体失败")
+				return
+			}
+			data["MediaItems"] = items
+		}
+		if rawID := strings.TrimSpace(c.Query("media_id")); rawID != "" {
+			mediaID, err := positiveInt(rawID)
+			if err != nil {
+				c.String(http.StatusBadRequest, "媒体 ID 无效")
+				return
+			}
+			selected, err := handler.media.FindAdminMedia(c.Request.Context(), mediaID)
+			if err != nil {
+				c.String(http.StatusInternalServerError, "读取媒体详情失败")
+				return
+			}
+			if selected == nil {
+				c.String(http.StatusNotFound, "媒体不存在")
+				return
+			}
+			data["SelectedMedia"] = selected
+		}
+	}
+	handler.page(c, "admin_cache.html", "数据管理 - Moovie影牛", data)
+}
+
+// mediaTask 只创建后台任务；抓取和模型调用不占用管理请求。
+func (handler *Handler) mediaTask(c *gin.Context) {
+	if handler.media == nil {
+		apiError(c, http.StatusServiceUnavailable, "媒体管理暂不可用")
+		return
+	}
+	mediaID, err := positiveInt(c.PostForm("media_id"))
+	if err != nil {
+		apiError(c, http.StatusBadRequest, "媒体 ID 无效")
+		return
+	}
+	media, err := handler.media.FindAdminMedia(c.Request.Context(), mediaID)
+	if err != nil {
+		apiError(c, http.StatusInternalServerError, "读取媒体失败")
+		return
+	}
+	if media == nil {
+		apiError(c, http.StatusNotFound, "媒体不存在")
+		return
+	}
+	claims, _ := auth.ClaimsFromContext(c)
+	var jobID int
+	switch c.PostForm("action") {
+	case "douban":
+		jobID, err = handler.media.EnqueueRefresh(c.Request.Context(), media.DoubanID, catalog.RefreshProviderDouban, "manual", claims.UserID)
+	case "tmdb":
+		jobID, err = handler.media.EnqueueRefresh(c.Request.Context(), media.DoubanID, catalog.RefreshProviderTMDB, "manual", claims.UserID)
+	case "semantic":
+		jobID, err = handler.media.RegenerateSemanticContent(c.Request.Context(), mediaID, claims.UserID)
+	case "embedding":
+		jobID, err = handler.media.RegenerateEmbedding(c.Request.Context(), mediaID, claims.UserID)
+	default:
+		apiError(c, http.StatusBadRequest, "操作类型无效")
+		return
+	}
+	if err != nil {
+		apiError(c, http.StatusConflict, "当前媒体状态不能执行该操作")
+		return
+	}
+	if jobID == 0 {
+		apiError(c, http.StatusConflict, "没有创建任务")
+		return
+	}
+	apiSuccess(c, gin.H{"job_id": jobID})
 }
 
 // dataClean 清理 7 天没更新过的资源记录。
@@ -553,124 +644,70 @@ func (handler *Handler) dataClean(c *gin.Context) {
 	apiSuccess(c, gin.H{"affected": affected, "message": "清理完成"})
 }
 
-
-// copyrightList 渲染版权屏蔽词列表，命中的影片不出现在搜索结果里。
-func (handler *Handler) copyrightList(c *gin.Context) {
-	filters, err := handler.search.ListCopyrightFilters(c.Request.Context())
+// contentFilterList 渲染统一内容过滤规则列表。
+func (handler *Handler) contentFilterList(c *gin.Context) {
+	filters, err := handler.search.ListContentFilters(c.Request.Context())
 	if err != nil {
 		c.String(http.StatusInternalServerError, "")
 		return
 	}
-	handler.page(c, "admin_copyright.html", "版權限制管理 - Moovie影牛", gin.H{"Filters": filters})
+	handler.page(c, "admin_filters.html", "内容过滤管理 - Moovie影牛", gin.H{"Filters": filters})
 }
 
-// copyrightCreate 新增版权屏蔽词。
-func (handler *Handler) copyrightCreate(c *gin.Context) {
-	keyword, ok := keyword(c)
+// contentFilterCreate 新增内容过滤规则。
+func (handler *Handler) contentFilterCreate(c *gin.Context) {
+	filter, ok := contentFilter(c)
 	if !ok {
 		return
 	}
-	filter, err := handler.search.CreateCopyrightFilter(c.Request.Context(), keyword)
+	created, err := handler.search.CreateContentFilter(c.Request.Context(), filter)
 	if err != nil {
 		apiError(c, http.StatusInternalServerError, "创建失败: "+err.Error())
 		return
 	}
-	apiSuccess(c, filter)
+	handler.invalidateTrends()
+	apiSuccess(c, created)
 }
 
-// copyrightUpdate 修改版权屏蔽词。
-func (handler *Handler) copyrightUpdate(c *gin.Context) {
+// contentFilterUpdate 修改关键词及其全部用途。
+func (handler *Handler) contentFilterUpdate(c *gin.Context) {
 	id, err := positiveUint(c.Param("id"))
 	if err != nil {
 		apiError(c, http.StatusBadRequest, "无效的 ID")
 		return
 	}
-	value, ok := keyword(c)
+	filter, ok := contentFilter(c)
 	if !ok {
 		return
 	}
-	if err := handler.search.UpdateCopyrightFilter(c.Request.Context(), id, value); err != nil {
+	filter.ID = id
+	if err := handler.search.UpdateContentFilter(c.Request.Context(), filter); err != nil {
 		apiError(c, http.StatusInternalServerError, "更新失败")
 		return
 	}
-	apiSuccess(c, search.Filter{ID: id, Keyword: value})
-}
-
-// copyrightDelete 删除版权屏蔽词。
-func (handler *Handler) copyrightDelete(c *gin.Context) {
-	handler.deleteFilter(c, handler.search.DeleteCopyrightFilter)
-}
-
-// categoryList 渲染分类屏蔽词列表，用于过滤掉不想收录的资源分类。
-func (handler *Handler) categoryList(c *gin.Context) {
-	filters, err := handler.search.ListCategoryFilters(c.Request.Context())
-	if err != nil {
-		c.String(http.StatusInternalServerError, "")
-		return
-	}
-	handler.page(c, "admin_category.html", "分类过滤管理 - Moovie影牛", gin.H{"Filters": filters})
-}
-
-// categoryCreate 新增分类屏蔽词。
-func (handler *Handler) categoryCreate(c *gin.Context) {
-	value, ok := keyword(c)
-	if !ok {
-		return
-	}
-	filter, err := handler.search.CreateCategoryFilter(c.Request.Context(), value)
-	if err != nil {
-		apiError(c, http.StatusInternalServerError, "创建失败: "+err.Error())
-		return
-	}
+	handler.invalidateTrends()
 	apiSuccess(c, filter)
 }
 
-// categoryDelete 删除分类屏蔽词。
-func (handler *Handler) categoryDelete(c *gin.Context) {
-	handler.deleteFilter(c, handler.search.DeleteCategoryFilter)
-}
-
-// nsfwList 渲染 NSFW 标签关键词列表。
-func (handler *Handler) nsfwList(c *gin.Context) {
-	filters, err := handler.search.ListNSFWFilters(c.Request.Context())
-	if err != nil {
-		c.String(http.StatusInternalServerError, "")
-		return
-	}
-	handler.page(c, "admin_nsfw.html", "NSFW 过滤管理 - Moovie影牛", gin.H{"Filters": filters})
-}
-
-// nsfwCreate 新增 NSFW 标签关键词。
-func (handler *Handler) nsfwCreate(c *gin.Context) {
-	value, ok := keyword(c)
-	if !ok {
-		return
-	}
-	filter, err := handler.search.CreateNSFWFilter(c.Request.Context(), value)
-	if err != nil {
-		apiError(c, http.StatusInternalServerError, "创建失败: "+err.Error())
-		return
-	}
-	apiSuccess(c, filter)
-}
-
-// nsfwDelete 删除 NSFW 标签关键词。
-func (handler *Handler) nsfwDelete(c *gin.Context) {
-	handler.deleteFilter(c, handler.search.DeleteNSFWFilter)
-}
-
-// deleteFilter 是两类屏蔽词删除的公共实现。
-func (handler *Handler) deleteFilter(c *gin.Context, remove func(context.Context, uint) error) {
+// contentFilterDelete 删除规则；不保留停用状态。
+func (handler *Handler) contentFilterDelete(c *gin.Context) {
 	id, err := positiveUint(c.Param("id"))
 	if err != nil {
 		apiError(c, http.StatusBadRequest, "无效的 ID")
 		return
 	}
-	if err := remove(c.Request.Context(), id); err != nil {
+	if err := handler.search.DeleteContentFilter(c.Request.Context(), id); err != nil {
 		apiError(c, http.StatusInternalServerError, "删除失败")
 		return
 	}
+	handler.invalidateTrends()
 	apiSuccess(c, nil)
+}
+
+func (handler *Handler) invalidateTrends() {
+	if handler.trends != nil {
+		handler.trends.InvalidateTrendCache()
+	}
 }
 
 // page 渲染后台页面。
@@ -712,18 +749,30 @@ func parseSite(c *gin.Context, requireValues bool) (search.Site, bool) {
 	return site, true
 }
 
-// keyword 解析并校验屏蔽词表单。
-func keyword(c *gin.Context) (string, bool) {
+// contentFilter 解析并校验统一内容过滤表单。
+func contentFilter(c *gin.Context) (search.ContentFilter, bool) {
 	value := strings.TrimSpace(c.PostForm("keyword"))
-	if value == "" {
-		apiError(c, http.StatusBadRequest, "关键词不能为空")
-		return "", false
+	length := len([]rune(value))
+	if length < 2 {
+		apiError(c, http.StatusBadRequest, "关键词至少需要 2 个字符")
+		return search.ContentFilter{}, false
 	}
-	if len([]rune(value)) > 100 {
+	if length > 100 {
 		apiError(c, http.StatusBadRequest, "关键词不能超过 100 个字符")
-		return "", false
+		return search.ContentFilter{}, false
 	}
-	return value, true
+	filter := search.ContentFilter{Keyword: value,
+		BlockIngest: formChecked(c.PostForm("block_ingest")), CopyrightRestricted: formChecked(c.PostForm("copyright_restricted")),
+		Sensitive: formChecked(c.PostForm("sensitive"))}
+	if !filter.BlockIngest && !filter.CopyrightRestricted && !filter.Sensitive {
+		apiError(c, http.StatusBadRequest, "至少选择一种过滤用途")
+		return search.ContentFilter{}, false
+	}
+	return filter, true
+}
+
+func formChecked(value string) bool {
+	return value == "on" || value == "true" || value == "1"
 }
 
 // positiveInt 解析正整数。

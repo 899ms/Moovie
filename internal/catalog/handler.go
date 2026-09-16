@@ -62,9 +62,10 @@ type BackdropSyncer interface {
 	SyncBackdrops(ctx context.Context, doubanID string) error
 }
 
-// VectorEnricher 生成语义向量。
-type VectorEnricher interface {
-	Enrich(ctx context.Context, doubanID string) error
+// EmbeddingPipeline 把语义文本和向量分成两个可独立重试的阶段。
+type EmbeddingPipeline interface {
+	GenerateSemanticContent(ctx context.Context, doubanID string) error
+	GenerateEmbedding(ctx context.Context, doubanID string) error
 }
 
 // Review 是一条豆瓣短评，以 JSON 数组形式存在 media.reviews_json。

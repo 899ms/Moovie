@@ -14,13 +14,13 @@ func TestRefreshHandlerDispatchesAllMetadataTypesAndChainsWork(t *testing.T) {
 	backdrops := &recordingBackdropSyncer{}
 	vectors := &recordingVectorEnricher{}
 	handler := NewRefreshHandler(queue, fetcher, vectors, WithRefreshReviews(reviews), WithRefreshBackdrops(backdrops))
-	for _, taskType := range []string{RefreshProviderDouban, RefreshProviderReviews, RefreshProviderTMDB, RefreshProviderEmbedding} {
+	for _, taskType := range []string{RefreshProviderDouban, RefreshProviderReviews, RefreshProviderTMDB, RefreshProviderSemantic, RefreshProviderEmbedding} {
 		if err := handler.Handle(t.Context(), workqueue.Job{TaskType: taskType, SubjectKey: "1292052", Reason: "test"}); err != nil {
 			t.Fatalf("%s: %v", taskType, err)
 		}
 	}
-	if len(fetcher.ids) != 1 || len(reviews.ids) != 1 || len(backdrops.ids) != 1 || len(vectors.ids) != 1 {
-		t.Fatalf("dispatch = fetch:%v reviews:%v backdrops:%v vectors:%v", fetcher.ids, reviews.ids, backdrops.ids, vectors.ids)
+	if len(fetcher.ids) != 1 || len(reviews.ids) != 1 || len(backdrops.ids) != 1 || len(vectors.semanticIDs) != 1 || len(vectors.vectorIDs) != 1 {
+		t.Fatalf("dispatch = fetch:%v reviews:%v backdrops:%v semantic:%v vectors:%v", fetcher.ids, reviews.ids, backdrops.ids, vectors.semanticIDs, vectors.vectorIDs)
 	}
 	if len(queue.jobs) != 1 || queue.jobs[0].TaskType != RefreshProviderTMDB {
 		t.Fatalf("chained jobs = %+v", queue.jobs)
@@ -56,8 +56,8 @@ func TestRefreshHandlerScheduleIncludesLowPriorityEmbeddingBackfill(t *testing.T
 	if err := handler.Schedule(t.Context(), workqueue.Job{}); err != nil {
 		t.Fatal(err)
 	}
-	if queue.dueLimit != 20 || queue.activeLimit != 10 || queue.embeddingLimit != embeddingBackfillBatchSize {
-		t.Fatalf("schedule limits = %d/%d/%d", queue.dueLimit, queue.activeLimit, queue.embeddingLimit)
+	if queue.dueLimit != 5 || queue.activeLimit != 3 || queue.semanticLimit != embeddingBackfillBatchSize || queue.embeddingLimit != embeddingBackfillBatchSize {
+		t.Fatalf("schedule limits = %d/%d/%d/%d", queue.dueLimit, queue.activeLimit, queue.semanticLimit, queue.embeddingLimit)
 	}
 }
 
@@ -68,7 +68,7 @@ type refreshQueueStub struct {
 
 type refreshScheduleStub struct {
 	refreshQueueStub
-	dueLimit, activeLimit, embeddingLimit int
+	dueLimit, activeLimit, semanticLimit, embeddingLimit int
 }
 
 func (queue *refreshScheduleStub) ScheduleDueRefreshes(_ context.Context, limit int) error {
@@ -83,6 +83,11 @@ func (queue *refreshScheduleStub) ScheduleActiveContentRefreshes(_ context.Conte
 
 func (queue *refreshScheduleStub) ScheduleEmbeddingBackfills(_ context.Context, limit int) error {
 	queue.embeddingLimit = limit
+	return nil
+}
+
+func (queue *refreshScheduleStub) ScheduleSemanticContentBackfills(_ context.Context, limit int) error {
+	queue.semanticLimit = limit
 	return nil
 }
 

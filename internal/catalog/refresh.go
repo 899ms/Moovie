@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"crypto/md5"
 	"fmt"
 	"time"
 
@@ -13,6 +14,7 @@ const (
 	RefreshProviderDouban    = "douban_metadata"
 	RefreshProviderReviews   = "douban_reviews"
 	RefreshProviderTMDB      = "tmdb"
+	RefreshProviderSemantic  = "semantic_content"
 	RefreshProviderEmbedding = "embedding"
 
 	// 下面这些 reason 都是详情页按「某个字段还是空的」自动触发的，
@@ -82,7 +84,8 @@ func (store *PostgresStore) EnqueueRefresh(ctx context.Context, doubanID, provid
 			return 0, nil
 		}
 	}
-	if provider == RefreshProviderEmbedding {
+	payload := map[string]string{"douban_id": doubanID}
+	if provider == RefreshProviderSemantic {
 		movie, err := store.FindByDoubanID(ctx, doubanID)
 		if err != nil {
 			return 0, err
@@ -90,7 +93,17 @@ func (store *PostgresStore) EnqueueRefresh(ctx context.Context, doubanID, provid
 		if !embeddingMetadataComplete(movie) {
 			return 0, nil
 		}
-	} else {
+		payload["semantic_hash"] = movie.semanticHash
+	} else if provider == RefreshProviderEmbedding {
+		movie, err := store.FindByDoubanID(ctx, doubanID)
+		if err != nil {
+			return 0, err
+		}
+		if movie == nil || movie.EmbeddingContent == "" {
+			return 0, nil
+		}
+		payload["content_hash"] = fmt.Sprintf("%x", md5.Sum([]byte(movie.EmbeddingContent)))
+	} else if reason != "manual" {
 		if skip, _ := store.alreadyComplete(ctx, provider, doubanID); skip {
 			return 0, nil
 		}
@@ -105,7 +118,7 @@ func (store *PostgresStore) EnqueueRefresh(ctx context.Context, doubanID, provid
 		priority = 5
 	}
 	return workqueue.NewPostgresStore(store.database).Enqueue(ctx, workqueue.Spec{
-		TaskType: provider, SubjectKey: doubanID, Payload: map[string]string{"douban_id": doubanID},
+		TaskType: provider, SubjectKey: doubanID, Payload: payload,
 		Reason: reason, RequestedBy: requestedBy, Priority: priority,
 	})
 }
@@ -189,10 +202,10 @@ func (store *PostgresStore) NeedsTMDBRefresh(ctx context.Context, doubanID strin
 	return needed, nil
 }
 
-// validRefreshProvider 只允许四种已知的刷新来源，防止任意字符串被写进任务表。
+// validRefreshProvider 只允许已知的刷新来源，防止任意字符串被写进任务表。
 func validRefreshProvider(provider string) bool {
 	switch provider {
-	case RefreshProviderDouban, RefreshProviderReviews, RefreshProviderTMDB, RefreshProviderEmbedding:
+	case RefreshProviderDouban, RefreshProviderReviews, RefreshProviderTMDB, RefreshProviderSemantic, RefreshProviderEmbedding:
 		return true
 	default:
 		return false
@@ -260,9 +273,8 @@ ON CONFLICT (task_type, subject_key) WHERE status IN ('pending', 'running') DO N
 	return nil
 }
 
-// ScheduleEmbeddingBackfills 低优先级补齐从未生成过向量的影片。
-// 元数据变化触发的重算由 updateRefreshState 直接入队，这里只管首次生成。
-func (store *PostgresStore) ScheduleEmbeddingBackfills(ctx context.Context, limit int) error {
+// ScheduleSemanticContentBackfills 补齐缺少语义文本的完整影片。
+func (store *PostgresStore) ScheduleSemanticContentBackfills(ctx context.Context, limit int) error {
 	if limit <= 0 {
 		limit = embeddingBackfillBatchSize
 	}
@@ -271,19 +283,52 @@ func (store *PostgresStore) ScheduleEmbeddingBackfills(ctx context.Context, limi
     FROM media m
     WHERE m.douban_id <> ''
       AND m.metadata_status <> 'partial' AND m.completeness_score >= 70
+      AND m.embedding_content = ''
+      AND NOT EXISTS (
+        SELECT 1 FROM worker_jobs blocked
+        WHERE blocked.task_type = 'semantic_content' AND blocked.subject_key = m.douban_id
+          AND (blocked.status IN ('pending', 'running') OR
+            (blocked.status = 'failed' AND blocked.payload->>'semantic_hash' = m.semantic_hash))
+      )
+    ORDER BY m.id
+    LIMIT $1
+)
+INSERT INTO worker_jobs (task_type, subject_key, payload, reason, status, priority, available_at)
+SELECT 'semantic_content', m.douban_id,
+       JSONB_BUILD_OBJECT('douban_id', m.douban_id, 'semantic_hash', m.semantic_hash),
+       'semantic_backfill', 'pending', $2, NOW()
+FROM media m JOIN candidates ON candidates.douban_id = m.douban_id
+ON CONFLICT (task_type, subject_key) WHERE status IN ('pending', 'running') DO NOTHING`, limit, embeddingBackfillPriority)
+	if err != nil {
+		return fmt.Errorf("schedule semantic content backfills: %w", err)
+	}
+	return nil
+}
+
+// ScheduleEmbeddingBackfills 只处理已有语义文本但向量为空的影片。
+func (store *PostgresStore) ScheduleEmbeddingBackfills(ctx context.Context, limit int) error {
+	if limit <= 0 {
+		limit = embeddingBackfillBatchSize
+	}
+	_, err := store.database.Exec(ctx, `WITH candidates AS (
+    SELECT m.douban_id
+    FROM media m
+    WHERE m.douban_id <> '' AND m.embedding_content <> ''
       AND m.embedding IS NULL
       AND NOT EXISTS (
         SELECT 1 FROM worker_jobs blocked
         WHERE blocked.task_type = 'embedding' AND blocked.subject_key = m.douban_id
-          AND blocked.status IN ('pending', 'running')
+          AND (blocked.status IN ('pending', 'running') OR
+            (blocked.status = 'failed' AND blocked.payload->>'content_hash' = md5(m.embedding_content)))
       )
-    ORDER BY m.embedding IS NULL DESC, m.id
+    ORDER BY m.id
     LIMIT $1
 )
 INSERT INTO worker_jobs (task_type, subject_key, payload, reason, status, priority, available_at)
-SELECT 'embedding', douban_id, JSONB_BUILD_OBJECT('douban_id', douban_id),
+SELECT 'embedding', douban_id,
+       JSONB_BUILD_OBJECT('douban_id', douban_id, 'content_hash', md5(embedding_content)),
        'embedding_backfill', 'pending', $2, NOW()
-FROM candidates
+FROM candidates JOIN media USING (douban_id)
 ON CONFLICT (task_type, subject_key) WHERE status IN ('pending', 'running') DO NOTHING`, limit, embeddingBackfillPriority)
 	if err != nil {
 		return fmt.Errorf("schedule embedding backfills: %w", err)
@@ -291,13 +336,13 @@ ON CONFLICT (task_type, subject_key) WHERE status IN ('pending', 'running') DO N
 	return nil
 }
 
-// RefreshHandler 是资料刷新任务的执行器，四种 provider 走同一个 Handle 分发。
+// RefreshHandler 是资料刷新任务的执行器，各 provider 走同一个 Handle 分发。
 type RefreshHandler struct {
-	queue     RefreshQueue
-	fetcher   Fetcher
-	vectors   VectorEnricher
-	reviews   ReviewFetcher
-	backdrops BackdropSyncer
+	queue      RefreshQueue
+	fetcher    Fetcher
+	embeddings EmbeddingPipeline
+	reviews    ReviewFetcher
+	backdrops  BackdropSyncer
 }
 
 // RefreshHandlerOption 是刷新执行器的可选装配项。
@@ -314,8 +359,8 @@ func WithRefreshBackdrops(syncer BackdropSyncer) RefreshHandlerOption {
 }
 
 // NewRefreshHandler 创建刷新执行器。
-func NewRefreshHandler(queue RefreshQueue, fetcher Fetcher, vectors VectorEnricher, options ...RefreshHandlerOption) *RefreshHandler {
-	handler := &RefreshHandler{queue: queue, fetcher: fetcher, vectors: vectors}
+func NewRefreshHandler(queue RefreshQueue, fetcher Fetcher, embeddings EmbeddingPipeline, options ...RefreshHandlerOption) *RefreshHandler {
+	handler := &RefreshHandler{queue: queue, fetcher: fetcher, embeddings: embeddings}
 	for _, option := range options {
 		option(handler)
 	}
@@ -360,11 +405,16 @@ func (handler *RefreshHandler) Handle(ctx context.Context, job workqueue.Job) er
 			return workqueue.Terminal(fmt.Errorf("TMDB refresher is not configured"))
 		}
 		return handler.backdrops.SyncBackdrops(ctx, doubanID)
+	case RefreshProviderSemantic:
+		if handler.embeddings == nil {
+			return workqueue.Terminal(fmt.Errorf("semantic content generator is not configured"))
+		}
+		return handler.embeddings.GenerateSemanticContent(ctx, doubanID)
 	case RefreshProviderEmbedding:
-		if handler.vectors == nil {
+		if handler.embeddings == nil {
 			return workqueue.Terminal(fmt.Errorf("embedding refresher is not configured"))
 		}
-		return handler.vectors.Enrich(ctx, doubanID)
+		return handler.embeddings.GenerateEmbedding(ctx, doubanID)
 	default:
 		return workqueue.Terminal(fmt.Errorf("unsupported metadata refresh provider %q", job.TaskType))
 	}
@@ -375,6 +425,7 @@ func (handler *RefreshHandler) Schedule(ctx context.Context, _ workqueue.Job) er
 	store, ok := handler.queue.(interface {
 		ScheduleDueRefreshes(context.Context, int) error
 		ScheduleActiveContentRefreshes(context.Context, int) error
+		ScheduleSemanticContentBackfills(context.Context, int) error
 		ScheduleEmbeddingBackfills(context.Context, int) error
 	})
 	if !ok {
@@ -384,6 +435,9 @@ func (handler *RefreshHandler) Schedule(ctx context.Context, _ workqueue.Job) er
 		return err
 	}
 	if err := store.ScheduleActiveContentRefreshes(ctx, 3); err != nil {
+		return err
+	}
+	if err := store.ScheduleSemanticContentBackfills(ctx, embeddingBackfillBatchSize); err != nil {
 		return err
 	}
 	return store.ScheduleEmbeddingBackfills(ctx, embeddingBackfillBatchSize)

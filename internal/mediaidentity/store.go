@@ -615,9 +615,10 @@ metadata_status = CASE WHEN title <> '' AND (summary <> '' OR original_title <> 
 content_hash = $2, semantic_hash = $3, completeness_score = $4,
 merge_rule_version = $5, unchanged_refresh_count = $6, next_refresh_at = $7,
 last_content_change_at = CASE WHEN $8 THEN NOW() ELSE last_content_change_at END,
-last_metadata_sync_at = NOW(), updated_at = CASE WHEN $8 THEN NOW() ELSE updated_at END
+last_metadata_sync_at = NOW(), updated_at = CASE WHEN $8 THEN NOW() ELSE updated_at END,
+embedding_content = CASE WHEN $9 THEN '' ELSE embedding_content END
 WHERE id = $1`, mediaID, contentHash,
-		semanticHash, completeness, mergeRuleVersion, unchangedCount, nextRefresh, changed)
+		semanticHash, completeness, mergeRuleVersion, unchangedCount, nextRefresh, changed, semanticChanged)
 	if err != nil {
 		return fmt.Errorf("update media refresh state: %w", err)
 	}
@@ -629,9 +630,11 @@ WHERE id = $1`, mediaID, contentHash,
 		// 不显式 ::text 的话 Postgres 在 Parse 阶段就报 42P18 推断不出类型。
 		if _, err := store.database.Exec(ctx, `INSERT INTO worker_jobs
 (task_type, subject_key, payload, reason, status, priority, available_at)
-VALUES ('embedding', $1, jsonb_build_object('douban_id', $1::text), 'semantic_change', 'pending', 0, NOW())
-ON CONFLICT (task_type, subject_key) WHERE status IN ('pending', 'running') DO NOTHING`, doubanID); err != nil {
-			return fmt.Errorf("enqueue embedding job: %w", err)
+VALUES ('semantic_content', $1,
+        jsonb_build_object('douban_id', $1::text, 'semantic_hash', $2::text),
+        'semantic_change', 'pending', 0, NOW())
+ON CONFLICT (task_type, subject_key) WHERE status IN ('pending', 'running') DO NOTHING`, doubanID, semanticHash); err != nil {
+			return fmt.Errorf("enqueue semantic content job: %w", err)
 		}
 	}
 	return nil

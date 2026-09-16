@@ -118,7 +118,7 @@ func main() {
 		operations.WithTelemetryCleanup(metricsStore.DeleteExpiredTelemetry),
 		operations.WithSearchDiscoveryCleanup(movies.PurgeSearchDiscoveryProbes))
 	dispatcher := workqueue.NewDispatcher(queueStore, cfg.Worker.Concurrency, cfg.Worker.Poll)
-	for _, taskType := range []string{catalog.RefreshProviderDouban, catalog.RefreshProviderReviews, catalog.RefreshProviderTMDB, catalog.RefreshProviderEmbedding} {
+	for _, taskType := range []string{catalog.RefreshProviderDouban, catalog.RefreshProviderReviews, catalog.RefreshProviderTMDB, catalog.RefreshProviderSemantic, catalog.RefreshProviderEmbedding} {
 		dispatcher.Handle(taskType, 10*time.Minute, metadataHandler.Handle)
 	}
 	dispatcher.Handle("metadata_schedule", 2*time.Minute, metadataHandler.Schedule)

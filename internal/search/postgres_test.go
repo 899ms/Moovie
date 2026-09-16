@@ -173,6 +173,9 @@ func TestPostgresStoreLoadsEnabledSitesAndFilters(t *testing.T) {
 	if err != nil || len(keywords) != 1 || keywords[0] != "版权词" {
 		t.Fatalf("keywords/error = %v/%v", keywords, err)
 	}
+	if !strings.Contains(database.query, "FROM content_filters WHERE copyright_restricted") {
+		t.Fatalf("copyright query = %s", database.query)
+	}
 }
 
 func TestPostgresStoreSupportsPlaybackLookups(t *testing.T) {
@@ -236,8 +239,31 @@ func TestPostgresStoreLogsAndAggregatesTrendingKeywords(t *testing.T) {
 	if err != nil || len(items) != 1 || items[0].Count != 3 {
 		t.Fatalf("trending/error = %+v/%v", items, err)
 	}
-	if !strings.Contains(database.query, "FROM search_logs") || !reflect.DeepEqual(database.arguments, []any{24, 20}) {
+	if !strings.Contains(database.query, "FROM search_logs") || !strings.Contains(database.query, "filter.sensitive") || !reflect.DeepEqual(database.arguments, []any{24, 20}) {
 		t.Fatalf("24h query/args = %s / %v", database.query, database.arguments)
+	}
+}
+
+func TestPostgresStoreManagesUnifiedContentFilters(t *testing.T) {
+	now := time.Now()
+	database := &fakeSQLDatabase{rows: &fakeSQLRows{values: [][]any{{uint(7), "情色", true, false, true, now, now}}}}
+	store := NewPostgresStore(database)
+	filters, err := store.ListContentFilters(context.Background())
+	if err != nil || len(filters) != 1 || !filters[0].BlockIngest || !filters[0].Sensitive {
+		t.Fatalf("filters/error = %+v/%v", filters, err)
+	}
+
+	database.row = fakeSQLRow{value: uint(8)}
+	created, err := store.CreateContentFilter(context.Background(), ContentFilter{Keyword: "漫威", CopyrightRestricted: true})
+	if err != nil || created.ID != 8 || !strings.Contains(database.query, "INSERT INTO content_filters") {
+		t.Fatalf("created/query/error = %+v/%s/%v", created, database.query, err)
+	}
+
+	if err := store.UpdateContentFilter(context.Background(), ContentFilter{ID: 8, Keyword: "漫威电影", CopyrightRestricted: true}); err != nil || !strings.Contains(database.execQuery, "UPDATE content_filters") {
+		t.Fatalf("update query/error = %s/%v", database.execQuery, err)
+	}
+	if err := store.DeleteContentFilter(context.Background(), 8); err != nil || database.execQuery != "DELETE FROM content_filters WHERE id=$1" {
+		t.Fatalf("delete query/error = %s/%v", database.execQuery, err)
 	}
 }
 

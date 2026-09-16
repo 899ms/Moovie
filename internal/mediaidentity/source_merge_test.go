@@ -1,9 +1,49 @@
 package mediaidentity
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/TwoThreeWang/Moovie/new/internal/platform/database/testdb"
 )
+
+func TestSemanticChangeClearsTextButKeepsOldVectorAndQueuesGatewayWork(t *testing.T) {
+	pool := testdb.Pool(t)
+	store := NewPostgresStore(pool)
+	media := Media{
+		DoubanID: "1292052", MediaType: "movie", Title: "肖申克的救赎", Year: "1994",
+		Poster: "poster", Summary: "旧简介", Genres: "剧情", Countries: "美国",
+		Directors: `[{"name":"弗兰克"}]`, Actors: `[{"name":"蒂姆"}]`, Duration: "142分钟",
+	}
+	merged, err := store.MergeSource(t.Context(), "douban", media, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vector := "[" + strings.Repeat("0,", 767) + "0]"
+	if _, err := pool.Exec(t.Context(), `UPDATE media SET embedding_content='old semantic text', embedding=$2::vector WHERE id=$1`, merged.ID, vector); err != nil {
+		t.Fatal(err)
+	}
+	media.Summary = "新简介"
+	if _, err := store.MergeSource(t.Context(), "douban", media, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	var hasVector bool
+	if err := pool.QueryRow(t.Context(), `SELECT embedding_content, embedding IS NOT NULL FROM media WHERE id=$1`, merged.ID).Scan(&content, &hasVector); err != nil {
+		t.Fatal(err)
+	}
+	if content != "" || !hasVector {
+		t.Fatalf("semantic invalidation = content:%q vector:%t", content, hasVector)
+	}
+	var jobs int
+	if err := pool.QueryRow(t.Context(), `SELECT COUNT(*) FROM worker_jobs WHERE task_type='semantic_content' AND subject_key='1292052' AND status IN ('pending','running')`).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if jobs != 1 {
+		t.Fatalf("semantic jobs = %d, want 1", jobs)
+	}
+}
 
 func TestSourceFieldsKeepProviderPriorityBoundaries(t *testing.T) {
 	douban := sourceFields("douban", Media{MediaType: "season", Title: "中文名", OriginalTitle: "旧原名", Backdrops: "ignored", RatingDouban: 9.2})

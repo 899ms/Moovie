@@ -228,6 +228,11 @@ func TestTrendsPagePreservesThresholdsSEOAndCache(t *testing.T) {
 	if logger.trendingCalls != 2 {
 		t.Fatalf("trends cache missed: calls=%d", logger.trendingCalls)
 	}
+	app.searchHandler.InvalidateTrendCache()
+	_ = responseBody(t, app.client, app.baseURL+"/trends")
+	if logger.trendingCalls != 4 {
+		t.Fatalf("trend cache was not invalidated: calls=%d", logger.trendingCalls)
+	}
 }
 
 type fakeSearcher struct {

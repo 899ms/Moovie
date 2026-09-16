@@ -450,10 +450,18 @@ func (syncer *recordingBackdropSyncer) SyncBackdrops(_ context.Context, doubanID
 	return nil
 }
 
-type recordingVectorEnricher struct{ ids []string }
+type recordingVectorEnricher struct {
+	semanticIDs []string
+	vectorIDs   []string
+}
 
-func (enricher *recordingVectorEnricher) Enrich(_ context.Context, doubanID string) error {
-	enricher.ids = append(enricher.ids, doubanID)
+func (enricher *recordingVectorEnricher) GenerateSemanticContent(_ context.Context, doubanID string) error {
+	enricher.semanticIDs = append(enricher.semanticIDs, doubanID)
+	return nil
+}
+
+func (enricher *recordingVectorEnricher) GenerateEmbedding(_ context.Context, doubanID string) error {
+	enricher.vectorIDs = append(enricher.vectorIDs, doubanID)
 	return nil
 }
 

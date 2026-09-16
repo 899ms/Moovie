@@ -99,3 +99,10 @@ func (cache *TTL[T]) Len() int {
 	defer cache.mu.Unlock()
 	return len(cache.entries)
 }
+
+// Clear 清空全部缓存项，用于底层规则变化后立即丢弃旧结果。
+func (cache *TTL[T]) Clear() {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	clear(cache.entries)
+}

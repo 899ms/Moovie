@@ -13,9 +13,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// NSFWKeywordReader 提供 NSFW 标签关键词。
-type NSFWKeywordReader interface {
-	NSFWKeywords(ctx context.Context) ([]string, error)
+// SensitiveKeywordReader 提供敏感内容关键词。
+type SensitiveKeywordReader interface {
+	SensitiveKeywords(ctx context.Context) ([]string, error)
 }
 
 // Handler 提供观看记录的接口和首页/仪表盘的 HTMX 片段。
@@ -26,7 +26,7 @@ type Handler struct {
 	todayUpdateReader TodayUpdateReader
 	episodeReader     mediaidentity.EpisodeReader
 	timeZone          string
-	nsfwReader        NSFWKeywordReader
+	sensitiveReader   SensitiveKeywordReader
 }
 
 // HandlerOption 用于注入可选依赖。
@@ -43,9 +43,9 @@ func WithEpisodeReader(reader mediaidentity.EpisodeReader) HandlerOption {
 	return func(handler *Handler) { handler.episodeReader = reader }
 }
 
-// WithNSFWKeywordReader 启用首页继续观看的 NSFW 海报模糊化。
-func WithNSFWKeywordReader(reader NSFWKeywordReader) HandlerOption {
-	return func(handler *Handler) { handler.nsfwReader = reader }
+// WithSensitiveKeywordReader 启用首页继续观看的敏感内容封面模糊化。
+func WithSensitiveKeywordReader(reader SensitiveKeywordReader) HandlerOption {
+	return func(handler *Handler) { handler.sensitiveReader = reader }
 }
 
 // NewHandler 创建观看记录处理器。
@@ -109,13 +109,14 @@ func (handler *Handler) dashboard(c *gin.Context) {
 	const pageSize = 24
 	offset := (page - 1) * pageSize
 	records, count, _ := handler.continueRecords(c, userID, pageSize, offset)
+	handler.markSensitive(c.Request.Context(), records)
 	partial := "partials/dashboard_history.html"
 	if page > 1 {
 		partial = "partials/dashboard_history_grid.html"
 	}
 	c.HTML(http.StatusOK, partial, gin.H{
 		"History": records, "HasMore": offset+len(records) < count,
-		"NextPage": page + 1, "IsFirstPage": page == 1,
+		"NextPage": page + 1, "IsFirstPage": page == 1, "BlurSensitive": true,
 	})
 }
 
@@ -131,46 +132,43 @@ func (handler *Handler) recent(c *gin.Context) {
 		c.HTML(http.StatusOK, "partials/dashboard_history.html", gin.H{"History": nil})
 		return
 	}
-	handler.markNSFW(c.Request.Context(), records)
-	c.HTML(http.StatusOK, "partials/dashboard_history.html", gin.H{"History": records, "HasMore": false, "BlurNSFW": true})
+	handler.markSensitive(c.Request.Context(), records)
+	c.HTML(http.StatusOK, "partials/dashboard_history.html", gin.H{"History": records, "HasMore": false, "BlurSensitive": true})
 }
 
-// markNSFW 根据 NSFW 关键词标记记录。
-func (handler *Handler) markNSFW(ctx context.Context, records []Record) {
-	if handler.nsfwReader == nil || len(records) == 0 {
+// markSensitive 按标题、规范分类和资源分类标签标记需要模糊封面的记录。
+func (handler *Handler) markSensitive(ctx context.Context, records []Record) {
+	if handler.sensitiveReader == nil || len(records) == 0 {
 		return
 	}
-	keywords, err := handler.nsfwReader.NSFWKeywords(ctx)
+	keywords, err := handler.sensitiveReader.SensitiveKeywords(ctx)
 	if err != nil || len(keywords) == 0 {
 		return
 	}
-	lowerKW := make([]string, len(keywords))
-	for i, kw := range keywords {
-		lowerKW[i] = strings.ToLower(kw)
+	lowerKW := make([]string, 0, len(keywords))
+	for _, keyword := range keywords {
+		if keyword = strings.TrimSpace(keyword); keyword != "" {
+			lowerKW = append(lowerKW, strings.ToLower(keyword))
+		}
 	}
 
-	var needVod []VodKey
+	var vodKeys []VodKey
 	for _, r := range records {
-		if r.Genres == "" && r.Source != "" && r.VodID != "" {
-			needVod = append(needVod, VodKey{SourceKey: r.Source, VodID: r.VodID})
+		if r.Source != "" && r.VodID != "" {
+			vodKeys = append(vodKeys, VodKey{SourceKey: r.Source, VodID: r.VodID})
 		}
 	}
 	var vodTags map[VodKey]string
-	if len(needVod) > 0 {
-		vodTags, _ = handler.store.VodTags(ctx, needVod)
+	if len(vodKeys) > 0 {
+		vodTags, _ = handler.store.VodTags(ctx, vodKeys)
 	}
 
 	for i := range records {
-		tags := strings.ToLower(records[i].Genres)
-		if tags == "" && vodTags != nil {
-			tags = strings.ToLower(vodTags[VodKey{SourceKey: records[i].Source, VodID: records[i].VodID}])
-		}
-		if tags == "" {
-			continue
-		}
+		text := strings.ToLower(strings.Join([]string{records[i].Title, records[i].Genres,
+			vodTags[VodKey{SourceKey: records[i].Source, VodID: records[i].VodID}]}, " "))
 		for _, kw := range lowerKW {
-			if strings.Contains(tags, kw) {
-				records[i].NSFW = true
+			if strings.Contains(text, kw) {
+				records[i].Sensitive = true
 				break
 			}
 		}

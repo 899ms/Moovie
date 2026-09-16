@@ -17,31 +17,32 @@ import "time"
 // Movie 是 media 表在页面层的视图结构。
 // 注意它并不等于数据库字段：IMDbID 来自 media_external_ids，Embedding 来自 pgvector 列。
 type Movie struct {
-	ID                    int
-	DoubanID              string
-	Title                 string
-	OriginalTitle         string
-	Year                  string
-	Poster                string
-	Rating                float64
-	Genres                string
-	Countries             string
-	Directors             string
-	Actors                string
-	Summary               string
-	Duration              string
-	IMDbID                string
-	MediaType             string
-	SeriesStatus          string
-	Backdrops             string
-	EmbeddingContent string
-	Embedding        []float32
-	ReviewsJSON           string
-	ReviewsUpdatedAt      time.Time
-	MetadataStatus        string
-	CompletenessScore     int
-	NextRefreshAt         *time.Time
-	UpdatedAt             time.Time
+	ID                int
+	DoubanID          string
+	Title             string
+	OriginalTitle     string
+	Year              string
+	Poster            string
+	Rating            float64
+	Genres            string
+	Countries         string
+	Directors         string
+	Actors            string
+	Summary           string
+	Duration          string
+	IMDbID            string
+	MediaType         string
+	SeriesStatus      string
+	Backdrops         string
+	EmbeddingContent  string
+	Embedding         []float32
+	semanticHash      string
+	ReviewsJSON       string
+	ReviewsUpdatedAt  time.Time
+	MetadataStatus    string
+	CompletenessScore int
+	NextRefreshAt     *time.Time
+	UpdatedAt         time.Time
 }
 
 // SeriesSeason 是详情页季度导航所需的最小数据。

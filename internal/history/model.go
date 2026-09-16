@@ -34,5 +34,5 @@ type Record struct {
 	WatchedAt       time.Time `json:"watched_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 	Genres          string    `json:"-"`
-	NSFW            bool      `json:"-"`
+	Sensitive       bool      `json:"-"`
 }

@@ -12,9 +12,21 @@ import (
 	"github.com/TwoThreeWang/Moovie/new/internal/platform/database/testdb"
 )
 
+type filterStoreStub struct {
+	copyright []string
+	ingest    []string
+}
+
+func (store filterStoreStub) CopyrightKeywords(context.Context) ([]string, error) {
+	return store.copyright, nil
+}
+
+func (store filterStoreStub) IngestBlockedKeywords(context.Context) ([]string, error) {
+	return store.ingest, nil
+}
+
 func TestServiceUsesLocalResultsFiltersCopyrightAndSortsBySpeed(t *testing.T) {
 	store := NewPostgresStore(testdb.Pool(t))
-	_, _ = store.CreateCopyrightFilter(t.Context(), "禁片")
 	for _, item := range []VodItem{
 		{SourceKey: "a", VodId: "1", VodName: "普通电影"},
 		{SourceKey: "b", VodId: "2", VodName: "禁片电影示例"},
@@ -28,7 +40,7 @@ func TestServiceUsesLocalResultsFiltersCopyrightAndSortsBySpeed(t *testing.T) {
 	// 测速结果写在 vod_items 上：a 3000ms、c 900ms，d 未测速。
 	seedPlaybackSpeed(t, "a", "1", 101, 1001, 3000)
 	seedPlaybackSpeed(t, "c", "3", 102, 1002, 900)
-	service := NewService(store, store, store, crawlerFunc(nil), nil, nil, ServiceConfig{})
+	service := NewService(store, store, filterStoreStub{copyright: []string{"禁片"}}, crawlerFunc(nil), nil, nil, ServiceConfig{})
 	result, err := service.Search(context.Background(), "电影", false)
 	if err != nil {
 		t.Fatalf("Search() error = %v", err)
@@ -49,13 +61,24 @@ func TestServiceUsesLocalResultsFiltersCopyrightAndSortsBySpeed(t *testing.T) {
 	}
 }
 
+func TestCopyrightFilterMatchesTitleOnlyAndIgnoresCase(t *testing.T) {
+	service := &Service{filters: filterStoreStub{copyright: []string{"marvel"}}}
+	items, filtered := service.filterCopyright(t.Context(), []VodItem{
+		{VodName: "普通电影", TypeName: "Marvel 专区"},
+		{VodName: "MARVEL 电影", TypeName: "动作片"},
+	})
+	if filtered != 1 || len(items) != 1 || items[0].VodName != "普通电影" {
+		t.Fatalf("items/filtered = %+v/%d", items, filtered)
+	}
+}
+
 func TestServiceEnrichesResourceWithCanonicalMediaAndPersistsLink(t *testing.T) {
 	store := NewPostgresStore(testdb.Pool(t))
 	if err := seedServiceItem(t, store, VodItem{SourceKey: "source", VodId: "42", VodName: "肖申克", VodYear: "1994", VodDoubanId: "1292052"}); err != nil {
 		t.Fatal(err)
 	}
 	identity := &fakeMediaIdentity{mediaID: 17}
-	service := NewService(store, store, store, crawlerFunc(nil), nil, nil, ServiceConfig{ResourceMatchShadow: true, ResourceMatchAutoApply: true}, WithMediaIdentity(identity))
+	service := NewService(store, store, filterStoreStub{}, crawlerFunc(nil), nil, nil, ServiceConfig{ResourceMatchShadow: true, ResourceMatchAutoApply: true}, WithMediaIdentity(identity))
 	result, err := service.Search(context.Background(), "肖申克", false)
 	if err != nil || len(result.Items) != 1 {
 		t.Fatalf("result/error = %+v/%v", result, err)
@@ -72,7 +95,7 @@ func TestServiceKeepsExactMatchInShadowUntilAutoApplyIsEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := &fakeMediaIdentity{mediaID: 17}
-	service := NewService(store, store, store, crawlerFunc(nil), nil, nil, ServiceConfig{ResourceMatchShadow: true}, WithMediaIdentity(identity))
+	service := NewService(store, store, filterStoreStub{}, crawlerFunc(nil), nil, nil, ServiceConfig{ResourceMatchShadow: true}, WithMediaIdentity(identity))
 	result, err := service.Search(context.Background(), "肖申克", false)
 	if err != nil || len(result.Items) != 1 {
 		t.Fatalf("result/error = %+v/%v", result, err)
@@ -89,7 +112,7 @@ func TestServiceCanDisableResourceMatchShadowWrites(t *testing.T) {
 	store := NewPostgresStore(testdb.Pool(t))
 	_ = seedServiceItem(t, store, VodItem{SourceKey: "source", VodId: "42", VodName: "同名影片", VodYear: "2026"})
 	identity := &fakeMediaIdentity{mediaID: 17}
-	service := NewService(store, store, store, crawlerFunc(nil), nil, nil, ServiceConfig{}, WithMediaIdentity(identity))
+	service := NewService(store, store, filterStoreStub{}, crawlerFunc(nil), nil, nil, ServiceConfig{}, WithMediaIdentity(identity))
 	_, err := service.Search(context.Background(), "同名影片", false)
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +127,7 @@ func TestServicePersistsScoredEvidenceWithoutExposingShadowMatch(t *testing.T) {
 	_ = seedServiceItem(t, store, VodItem{SourceKey: "source", VodId: "42", VodName: "候选影片", VodYear: "2026", TypeName: "电影"})
 	identity := &fakeScoredMediaIdentity{match: MediaMatchResult{MediaID: 17, Confidence: 0.82,
 		MatchedBy: "weighted_features", Status: MatchStatusReview, ReasonJSON: `{"features":{"title":{"score":0.4}}}`}}
-	service := NewService(store, store, store, crawlerFunc(nil), nil, nil, ServiceConfig{ResourceMatchShadow: true}, WithMediaIdentity(identity))
+	service := NewService(store, store, filterStoreStub{}, crawlerFunc(nil), nil, nil, ServiceConfig{ResourceMatchShadow: true}, WithMediaIdentity(identity))
 	result, err := service.Search(context.Background(), "候选影片", false)
 	if err != nil || len(result.Items) != 1 {
 		t.Fatalf("result/error = %+v/%v", result, err)
@@ -119,7 +142,7 @@ func TestServicePersistsHardConflictBelowReviewThresholdAsRejected(t *testing.T)
 	_ = seedServiceItem(t, store, VodItem{SourceKey: "source", VodId: "42", VodName: "冲突影片", VodYear: "2026"})
 	identity := &fakeScoredMediaIdentity{match: MediaMatchResult{MediaID: 18, Confidence: 0.55,
 		MatchedBy: "weighted_features", Status: MatchStatusRejected, HardConflict: "year_mismatch", ReasonJSON: `{"hard_conflicts":["year_mismatch"]}`}}
-	service := NewService(store, store, store, crawlerFunc(nil), nil, nil, ServiceConfig{ResourceMatchShadow: true}, WithMediaIdentity(identity))
+	service := NewService(store, store, filterStoreStub{}, crawlerFunc(nil), nil, nil, ServiceConfig{ResourceMatchShadow: true}, WithMediaIdentity(identity))
 	_, err := service.Search(context.Background(), "冲突影片", false)
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +158,7 @@ func TestServiceKeepsTitleYearMatchInReviewWithoutClaimingCanonicalLink(t *testi
 		t.Fatal(err)
 	}
 	identity := &fakeMediaIdentity{mediaID: 17}
-	service := NewService(store, store, store, crawlerFunc(nil), nil, nil, ServiceConfig{ResourceMatchShadow: true}, WithMediaIdentity(identity))
+	service := NewService(store, store, filterStoreStub{}, crawlerFunc(nil), nil, nil, ServiceConfig{ResourceMatchShadow: true}, WithMediaIdentity(identity))
 	result, err := service.Search(context.Background(), "同名影片", false)
 	if err != nil || len(result.Items) != 1 {
 		t.Fatalf("result/error = %+v/%v", result, err)
@@ -155,7 +178,7 @@ func TestServiceDoesNotTrustLowConfidenceResourceLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := &fakeMediaIdentity{mediaID: 17, existingLinkID: 17, existingLinkConfidence: 0.7, existingLinkMatch: "title_year"}
-	service := NewService(store, store, store, crawlerFunc(nil), nil, nil, ServiceConfig{ResourceMatchShadow: true}, WithMediaIdentity(identity))
+	service := NewService(store, store, filterStoreStub{}, crawlerFunc(nil), nil, nil, ServiceConfig{ResourceMatchShadow: true}, WithMediaIdentity(identity))
 	result, err := service.Search(context.Background(), "同名影片", false)
 	if err != nil || len(result.Items) != 1 {
 		t.Fatalf("result/error = %+v/%v", result, err)
@@ -168,7 +191,6 @@ func TestServiceDoesNotTrustLowConfidenceResourceLink(t *testing.T) {
 func TestServiceFetchesEnabledSitesConcurrentlyAndToleratesPartialFailure(t *testing.T) {
 	store := NewPostgresStore(testdb.Pool(t))
 	seedSites(t, store, Site{Key: "ok", BaseURL: "https://ok", Enabled: true}, Site{Key: "bad", BaseURL: "https://bad", Enabled: true}, Site{Key: "off", BaseURL: "", Enabled: false})
-	_, _ = store.CreateCategoryFilter(t.Context(), "写真")
 	health := &recordingHealth{}
 	crawler := crawlerFunc(func(_ context.Context, _ string, _ string, sourceKey string, categories []string) ([]VodItem, error) {
 		if len(categories) != 1 || categories[0] != "写真" {
@@ -179,7 +201,7 @@ func TestServiceFetchesEnabledSitesConcurrentlyAndToleratesPartialFailure(t *tes
 		}
 		return []VodItem{{SourceKey: sourceKey, VodId: "1", VodName: "测试", VodPlayUrl: "正片$https://video.example/main.m3u8"}}, nil
 	})
-	service := NewService(store, store, store, crawler, health, nil, ServiceConfig{SourceTimeout: time.Second, TotalTimeout: time.Second})
+	service := NewService(store, store, filterStoreStub{ingest: []string{"写真"}}, crawler, health, nil, ServiceConfig{SourceTimeout: time.Second, TotalTimeout: time.Second})
 	result, err := service.Search(context.Background(), "测试", false)
 	if err != nil {
 		t.Fatalf("Search() error = %v", err)
@@ -200,7 +222,7 @@ func TestFetchAndSaveImmediatelyLinksFreshExactMediaIdentity(t *testing.T) {
 	store := NewPostgresStore(testdb.Pool(t))
 	seedSites(t, store, Site{Key: "source", BaseURL: "https://source.example", Enabled: true})
 	identity := &fakeMediaIdentity{mediaID: 17}
-	service := NewService(store, store, store, crawlerFunc(func(context.Context, string, string, string, []string) ([]VodItem, error) {
+	service := NewService(store, store, filterStoreStub{}, crawlerFunc(func(context.Context, string, string, string, []string) ([]VodItem, error) {
 		return []VodItem{{SourceKey: "source", VodId: "42", VodName: "新资源", VodPlayUrl: "正片$https://video.example/main.m3u8", VodDoubanId: "1292052"}}, nil
 	}), nil, nil, ServiceConfig{ResourceMatchAutoApply: true}, WithMediaIdentity(identity))
 
@@ -219,7 +241,7 @@ func TestServiceReturnsFreshResourcesAlongsideWarmLocalResults(t *testing.T) {
 	if err := seedServiceItem(t, store, VodItem{SourceKey: "source", VodId: "2", VodName: "末日地堡 第二季"}); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(store, store, store, crawlerFunc(func(context.Context, string, string, string, []string) ([]VodItem, error) {
+	service := NewService(store, store, filterStoreStub{}, crawlerFunc(func(context.Context, string, string, string, []string) ([]VodItem, error) {
 		return []VodItem{{SourceKey: "source", VodId: "1", VodName: "末日地堡 第一季", VodPlayUrl: "正片$https://video.example/main.m3u8"}}, nil
 	}), nil, immediateRunner{}, ServiceConfig{})
 
@@ -256,7 +278,7 @@ func TestServiceBoundsPerSearchSourceFanout(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 		return []VodItem{}, nil
 	})
-	service := NewService(store, store, store, crawler, nil, nil, ServiceConfig{
+	service := NewService(store, store, filterStoreStub{}, crawler, nil, nil, ServiceConfig{
 		SourceTimeout: time.Second, TotalTimeout: time.Second, SourceMaxConcurrency: 3,
 	})
 	if _, err := service.Search(context.Background(), "扇出", false); err != nil {
@@ -269,7 +291,7 @@ func TestServiceBoundsPerSearchSourceFanout(t *testing.T) {
 
 func TestServicePersistsFilteredResource(t *testing.T) {
 	store := NewPostgresStore(testdb.Pool(t))
-	service := NewService(store, store, store, crawlerFunc(nil), nil, nil, ServiceConfig{})
+	service := NewService(store, store, filterStoreStub{}, crawlerFunc(nil), nil, nil, ServiceConfig{})
 	item := VodItem{SourceKey: "source", VodId: "42", VodName: "剧集", VodPlayUrl: "第01集$https://a.example/1.m3u8"}
 	if err := service.persistItem(t.Context(), item); err != nil {
 		t.Fatal(err)
@@ -304,7 +326,7 @@ func TestServiceDoesNotRecordEmptyWhenEverySiteIsEmpty(t *testing.T) {
 	store := NewPostgresStore(testdb.Pool(t))
 	seedSites(t, store, Site{Key: "a", BaseURL: "", Enabled: true}, Site{Key: "b", BaseURL: "", Enabled: true})
 	health := &recordingHealth{}
-	service := NewService(store, store, store, crawlerFunc(func(context.Context, string, string, string, []string) ([]VodItem, error) {
+	service := NewService(store, store, filterStoreStub{}, crawlerFunc(func(context.Context, string, string, string, []string) ([]VodItem, error) {
 		return []VodItem{}, nil
 	}), health, nil, ServiceConfig{})
 	result, err := service.Search(context.Background(), "冷门词", false)
@@ -320,7 +342,7 @@ func TestServiceClassifiesPerSiteDeadlineAsTimeout(t *testing.T) {
 	store := NewPostgresStore(testdb.Pool(t))
 	seedSites(t, store, Site{Key: "slow", BaseURL: "", Enabled: true})
 	health := &recordingHealth{}
-	service := NewService(store, store, store, crawlerFunc(func(ctx context.Context, _ string, _ string, _ string, _ []string) ([]VodItem, error) {
+	service := NewService(store, store, filterStoreStub{}, crawlerFunc(func(ctx context.Context, _ string, _ string, _ string, _ []string) ([]VodItem, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}), health, nil, ServiceConfig{SourceTimeout: 5 * time.Millisecond, TotalTimeout: time.Second})
@@ -346,7 +368,7 @@ func TestServiceSingleflightCoalescesColdSearch(t *testing.T) {
 		<-release
 		return []VodItem{{SourceKey: "source", VodId: "1", VodName: "并发", VodPlayUrl: "正片$https://video.example/main.m3u8"}}, nil
 	})
-	service := NewService(store, store, store, crawler, nil, nil, ServiceConfig{SourceTimeout: time.Second, TotalTimeout: time.Second})
+	service := NewService(store, store, filterStoreStub{}, crawler, nil, nil, ServiceConfig{SourceTimeout: time.Second, TotalTimeout: time.Second})
 
 	var waitGroup sync.WaitGroup
 	results := make([]*Result, 2)
@@ -566,7 +588,7 @@ func TestSearchReturnsLocalResultsWithoutWaitingForSlowSources(t *testing.T) {
 		}
 		return []VodItem{{SourceKey: "slow", VodId: "2", VodName: "肖申克的救赎 慢站", VodPlayUrl: "正片$https://video.example/main.m3u8"}}, nil
 	})
-	service := NewService(store, store, store, crawler, nil, immediateRunner{},
+	service := NewService(store, store, filterStoreStub{}, crawler, nil, immediateRunner{},
 		ServiceConfig{RefreshWait: 50 * time.Millisecond})
 
 	startedAt := time.Now()

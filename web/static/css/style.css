@@ -158,7 +158,7 @@ img { max-width: 100%; height: auto; display: block; }
 .movie-card:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); }
 .movie-poster { position: relative; aspect-ratio: 2/3; overflow: hidden; }
 .movie-poster img { width: 100%; height: 100%; object-fit: cover; }
-.nsfw-blur .movie-poster img { filter: blur(20px); transition: filter 0.3s; }
+.sensitive-blur .movie-poster img { filter: blur(20px); transition: filter 0.3s; }
 .movie-rating { position: absolute; top: 8px; right: 8px; background: rgba(0, 0, 0, 0.7); color: var(--rating); padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
 .movie-info { padding: 10px 12px; }
 .movie-title { font-size: 0.875rem; font-weight: 500; color: var(--text); word-break: break-all; overflow: hidden; text-overflow: ellipsis; }
@@ -714,7 +714,7 @@ span.health-bad { background: #ef4444; color: #fff; }
 .queue-pagination { display: flex; justify-content: space-between; gap: 12px; margin-top: 20px; }
 .url-cell { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.875rem; color: var(--text-muted); }
 .empty-cell { text-align: center; color: var(--text-muted); padding: 40px !important; }
-/* 表单下方的说明文字。admin_copyright / admin_category / admin_nsfw / admin_collections
+/* 表单下方的说明文字。admin_filters / admin_collections
    都在用这个类，但一直没有定义，所以显示成了正文大小。
    直接挂在 .admin-card 下时还要自己补内边距：卡片本身没有 padding。 */
 .form-help { color: var(--text-muted); font-size: 0.8rem; line-height: 1.6; }

@@ -5,7 +5,7 @@
 //
 //	vod_items              资源条目（来源站原始字段）
 //	sites                  资源站清单
-//	copyright_filters      版权屏蔽关键词      category_filters 分类屏蔽关键词
+//	content_filters        内容过滤规则（采集、版权、敏感内容）
 //	search_logs            搜索日志（热搜从此表实时聚合）
 //	site_stats             资源站健康统计（熔断依据）
 //	resource_media_links   资源 → 规范媒体的关联
@@ -30,12 +30,15 @@ type Site struct {
 // BaseUrl 提供给模板使用的取值方法。
 func (site Site) BaseUrl() string { return site.BaseURL }
 
-// Filter 是一条屏蔽关键词（版权屏蔽和分类屏蔽共用这个结构）。
-type Filter struct {
-	ID        uint
-	Keyword   string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+// ContentFilter 是一条内容过滤规则。同一关键词可以同时承担多种用途。
+type ContentFilter struct {
+	ID                  uint
+	Keyword             string
+	BlockIngest         bool
+	CopyrightRestricted bool
+	Sensitive           bool
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 // VodItem 使用资源站原始字段名，HTMX 页面与 TVBox 输出共用这一份资源模型。

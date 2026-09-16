@@ -25,7 +25,7 @@ import (
 )
 
 func TestAdminPagesAndMutationsRequireRoleAndPreserveMainFlows(t *testing.T) {
-	router, users, searchStore, feedbackStore, adminToken, userToken := adminTestRouter(t)
+	router, users, searchStore, feedbackStore, _, adminToken, userToken := adminTestRouter(t)
 	guest := request(router, http.MethodGet, "/admin", "", true)
 	if guest.Code != http.StatusFound || guest.Header().Get("Location") != "/auth/login?redirect=/admin" {
 		t.Fatalf("guest = %d/%s", guest.Code, guest.Header().Get("Location"))
@@ -34,7 +34,7 @@ func TestAdminPagesAndMutationsRequireRoleAndPreserveMainFlows(t *testing.T) {
 	if forbidden.Code != http.StatusForbidden || !strings.Contains(forbidden.Body.String(), "需要管理员权限") {
 		t.Fatalf("forbidden = %d/%s", forbidden.Code, forbidden.Body.String())
 	}
-	for _, path := range []string{"/admin", "/admin/users", "/admin/sites", "/admin/data", "/admin/jobs", "/admin/matches", "/admin/copyright", "/admin/category"} {
+	for _, path := range []string{"/admin", "/admin/users", "/admin/sites", "/admin/data", "/admin/jobs", "/admin/matches", "/admin/filters"} {
 		response := request(router, http.MethodGet, path, adminToken, false)
 		if response.Code != http.StatusOK {
 			t.Fatalf("GET %s = %d/%s", path, response.Code, response.Body.String())
@@ -92,19 +92,29 @@ func TestAdminPagesAndMutationsRequireRoleAndPreserveMainFlows(t *testing.T) {
 		t.Fatalf("updated site = %+v", site)
 	}
 
-	copyright := formRequest(router, http.MethodPost, "/admin/copyright", url.Values{"keyword": {"漫威"}}, adminToken)
-	category := formRequest(router, http.MethodPost, "/admin/category", url.Values{"keyword": {"写真"}}, adminToken)
-	if copyright.Code != http.StatusOK || category.Code != http.StatusOK {
-		t.Fatalf("filter create = %d/%d", copyright.Code, category.Code)
+	copyright := formRequest(router, http.MethodPost, "/admin/filters", url.Values{"keyword": {"漫威"}, "copyright_restricted": {"on"}}, adminToken)
+	sensitive := formRequest(router, http.MethodPost, "/admin/filters", url.Values{"keyword": {"写真"}, "block_ingest": {"on"}, "sensitive": {"on"}}, adminToken)
+	if copyright.Code != http.StatusOK || sensitive.Code != http.StatusOK {
+		t.Fatalf("filter create = %d/%d", copyright.Code, sensitive.Code)
 	}
-	keywords, _ := searchStore.CopyrightKeywords(t.Context())
-	categories, _ := searchStore.CategoryKeywords(t.Context())
-	if len(keywords) != 1 || keywords[0] != "漫威" || len(categories) != 1 || categories[0] != "写真" {
-		t.Fatalf("filter keywords = %v/%v", keywords, categories)
+	filters, _ := searchStore.ListContentFilters(t.Context())
+	if len(filters) != 2 || filters[0].Keyword != "漫威" || !filters[0].CopyrightRestricted ||
+		filters[1].Keyword != "写真" || !filters[1].BlockIngest || !filters[1].Sensitive || searchStore.trendInvalidations != 2 {
+		t.Fatalf("content filters = %+v, invalidations=%d", filters, searchStore.trendInvalidations)
+	}
+	updatedFilter := formRequest(router, http.MethodPut, "/admin/filters/1", url.Values{"keyword": {"漫威电影"}, "copyright_restricted": {"on"}, "sensitive": {"on"}}, adminToken)
+	if updatedFilter.Code != http.StatusOK || searchStore.filters[0].Keyword != "漫威电影" || !searchStore.filters[0].Sensitive {
+		t.Fatalf("filter update = %d/%s filters=%+v", updatedFilter.Code, updatedFilter.Body.String(), searchStore.filters)
 	}
 
 	allUsers, _ := users.ListUsers(t.Context())
-	otherID := allUsers[1].ID
+	otherID := 0
+	for _, user := range allUsers {
+		if user.ID != 1 {
+			otherID = user.ID
+			break
+		}
+	}
 	role := formRequest(router, http.MethodPut, "/admin/users/"+itoa(otherID)+"/role", url.Values{"role": {"admin"}}, adminToken)
 	if role.Code != http.StatusOK {
 		t.Fatalf("role = %d/%s", role.Code, role.Body.String())
@@ -118,11 +128,12 @@ func TestAdminPagesAndMutationsRequireRoleAndPreserveMainFlows(t *testing.T) {
 		t.Fatalf("delete user = %d/%s", deleted.Code, deleted.Body.String())
 	}
 
-	_ = searchStore.Upsert(t.Context(), search.VodItem{SourceKey: "demo", VodId: "old", VodName: "旧数据", LastVisitedAt: time.Now().Add(-8 * 24 * time.Hour)})
-	_ = searchStore.Upsert(t.Context(), search.VodItem{SourceKey: "demo", VodId: "new", VodName: "新数据", LastVisitedAt: time.Now()})
-	// Upsert 默认把 last_seen_at 设成 NOW()；清理判断以 last_seen_at 优先，
-	// 必须让测试数据里的 last_seen_at 也落到过期窗口。
-	if _, err := testdb.Pool(t).Exec(t.Context(), `UPDATE vod_items SET last_seen_at = last_visited_at WHERE source_key = 'demo'`); err != nil {
+	_ = searchStore.Upsert(t.Context(), search.VodItem{SourceKey: "demo", VodId: "old", VodName: "旧数据", VodPlayUrl: "正片$https://video.example/old.m3u8", LastVisitedAt: time.Now().Add(-8 * 24 * time.Hour)})
+	_ = searchStore.Upsert(t.Context(), search.VodItem{SourceKey: "demo", VodId: "new", VodName: "新数据", VodPlayUrl: "正片$https://video.example/new.m3u8", LastVisitedAt: time.Now()})
+	// Upsert 会把活跃时间刷新为 NOW()，这里显式构造一条超过清理窗口的资源。
+	if _, err := testdb.Pool(t).Exec(t.Context(), `UPDATE vod_items
+SET last_seen_at = CASE WHEN vod_id='old' THEN NOW() - INTERVAL '8 days' ELSE NOW() END
+WHERE source_key = 'demo'`); err != nil {
 		t.Fatal(err)
 	}
 	cleaned := request(router, http.MethodPost, "/admin/data/clean", adminToken, false)
@@ -134,9 +145,79 @@ func TestAdminPagesAndMutationsRequireRoleAndPreserveMainFlows(t *testing.T) {
 	}
 }
 
+func TestAdminMediaManagementSearchesAndQueuesRecoveryTasks(t *testing.T) {
+	router, _, _, _, mediaManager, adminToken, userToken := adminTestRouter(t)
+	pool := testdb.Pool(t)
+	var mediaID int
+	if err := pool.QueryRow(t.Context(), `UPDATE media SET metadata_status='ready', completeness_score=90,
+semantic_hash='semantic-v1', embedding_content='old semantic',
+embedding=('[' || repeat('0,', 767) || '0]')::vector
+WHERE douban_id='1292052' RETURNING id`).Scan(&mediaID); err != nil {
+		t.Fatal(err)
+	}
+	blank := request(router, http.MethodGet, "/admin/data?q=%20%20", adminToken, false)
+	if blank.Code != http.StatusOK || mediaManager.searches != 0 || strings.Contains(blank.Body.String(), "<strong>电影</strong>") {
+		t.Fatalf("blank media search = status:%d searches:%d", blank.Code, mediaManager.searches)
+	}
+
+	page := request(router, http.MethodGet, "/admin/data?q=电影&media_id="+strconv.Itoa(mediaID), adminToken, false)
+	if mediaManager.searches != 1 {
+		t.Fatalf("media searches = %d", mediaManager.searches)
+	}
+	for _, expected := range []string{"Media 运维", "电影", "完整度 90", "语义文本 已生成", "重新生成向量"} {
+		if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), expected) {
+			t.Fatalf("media page missing %q: %d/%s", expected, page.Code, page.Body.String())
+		}
+	}
+
+	forbidden := formRequest(router, http.MethodPost, "/admin/data/media-task",
+		url.Values{"media_id": {strconv.Itoa(mediaID)}, "action": {"semantic"}}, userToken)
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("non-admin media task = %d", forbidden.Code)
+	}
+
+	semantic := formRequest(router, http.MethodPost, "/admin/data/media-task",
+		url.Values{"media_id": {strconv.Itoa(mediaID)}, "action": {"semantic"}}, adminToken)
+	if semantic.Code != http.StatusOK || !strings.Contains(semantic.Body.String(), `"job_id"`) {
+		t.Fatalf("semantic regeneration = %d/%s", semantic.Code, semantic.Body.String())
+	}
+	var content string
+	var hasVector bool
+	if err := pool.QueryRow(t.Context(), `SELECT embedding_content, embedding IS NOT NULL FROM media WHERE id=$1`, mediaID).Scan(&content, &hasVector); err != nil {
+		t.Fatal(err)
+	}
+	if content != "" || !hasVector {
+		t.Fatalf("semantic invalidation = content:%q vector:%t", content, hasVector)
+	}
+
+	if _, err := pool.Exec(t.Context(), `UPDATE media SET embedding_content='fresh semantic',
+embedding=('[' || repeat('0,', 767) || '0]')::vector WHERE id=$1`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	embedding := formRequest(router, http.MethodPost, "/admin/data/media-task",
+		url.Values{"media_id": {strconv.Itoa(mediaID)}, "action": {"embedding"}}, adminToken)
+	if embedding.Code != http.StatusOK {
+		t.Fatalf("embedding regeneration = %d/%s", embedding.Code, embedding.Body.String())
+	}
+	if err := pool.QueryRow(t.Context(), `SELECT embedding IS NOT NULL FROM media WHERE id=$1`, mediaID).Scan(&hasVector); err != nil || hasVector {
+		t.Fatalf("embedding invalidation = %t/%v", hasVector, err)
+	}
+
+	douban := formRequest(router, http.MethodPost, "/admin/data/media-task",
+		url.Values{"media_id": {strconv.Itoa(mediaID)}, "action": {"douban"}}, adminToken)
+	if douban.Code != http.StatusOK {
+		t.Fatalf("manual douban refresh = %d/%s", douban.Code, douban.Body.String())
+	}
+	var jobs int
+	if err := pool.QueryRow(t.Context(), `SELECT COUNT(*) FROM worker_jobs WHERE subject_key='1292052'
+AND task_type IN ('douban_metadata','semantic_content','embedding') AND status='pending'`).Scan(&jobs); err != nil || jobs != 3 {
+		t.Fatalf("media jobs = %d/%v", jobs, err)
+	}
+}
+
 func TestAdminMatchReviewRequiresReasonAndRecordsOneDecision(t *testing.T) {
 	testdb.Media(t, testdb.Pool(t), 7, 8, 9)
-	router, _, searchStore, _, token, userToken := adminTestRouter(t)
+	router, _, searchStore, _, _, token, userToken := adminTestRouter(t)
 	item := search.VodItem{SourceKey: "demo", VodId: "review-1", VodName: "待复核资源", VodPlayUrl: "正片$https://video.example/main.m3u8", VodYear: "2026"}
 	if err := searchStore.Upsert(t.Context(), item); err != nil {
 		t.Fatal(err)
@@ -211,7 +292,7 @@ func TestAdminMatchReviewRequiresReasonAndRecordsOneDecision(t *testing.T) {
 }
 
 func TestAdminRejectsUnsafeSiteAndKeywordInputs(t *testing.T) {
-	router, _, _, _, token, _ := adminTestRouter(t)
+	router, _, _, _, _, token, _ := adminTestRouter(t)
 	for _, values := range []url.Values{
 		{"key": {"bad key"}, "base_url": {"javascript:alert(1)"}},
 		{"key": {"private"}, "base_url": {"http://169.254.169.254/latest/meta-data"}},
@@ -222,26 +303,32 @@ func TestAdminRejectsUnsafeSiteAndKeywordInputs(t *testing.T) {
 			t.Fatalf("unsafe site = %d/%s", unsafe.Code, unsafe.Body.String())
 		}
 	}
-	long := formRequest(router, http.MethodPost, "/admin/category", url.Values{"keyword": {strings.Repeat("长", 101)}}, token)
+	long := formRequest(router, http.MethodPost, "/admin/filters", url.Values{"keyword": {strings.Repeat("长", 101)}, "block_ingest": {"on"}}, token)
 	if long.Code != http.StatusBadRequest {
 		t.Fatalf("long keyword = %d/%s", long.Code, long.Body.String())
 	}
+	short := formRequest(router, http.MethodPost, "/admin/filters", url.Values{"keyword": {"性"}, "sensitive": {"on"}}, token)
+	missingAction := formRequest(router, http.MethodPost, "/admin/filters", url.Values{"keyword": {"测试"}}, token)
+	if short.Code != http.StatusBadRequest || missingAction.Code != http.StatusBadRequest {
+		t.Fatalf("filter validation = short:%d missing-action:%d", short.Code, missingAction.Code)
+	}
 }
 
-func adminTestRouter(t *testing.T) (*gin.Engine, *identity.PostgresStore, *search.PostgresStore, *feedback.PostgresStore, string, string) {
+func adminTestRouter(t *testing.T) (*gin.Engine, *identity.PostgresStore, *adminSearchStoreStub, *feedback.PostgresStore, *adminMediaManagerSpy, string, string) {
 	testdb.Media(t, testdb.Pool(t), 7, 8, 9)
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	users := identity.NewPostgresStore(testdb.Pool(t))
 	_, _ = users.Create(t.Context(), identity.User{Email: "admin@example.com", Username: "admin", Role: "admin", CreatedAt: time.Now()})
 	_, _ = users.Create(t.Context(), identity.User{Email: "user@example.com", Username: "user", Role: "user", CreatedAt: time.Now()})
-	searchStore := search.NewPostgresStore(testdb.Pool(t))
+	searchStore := &adminSearchStoreStub{PostgresStore: search.NewPostgresStore(testdb.Pool(t))}
 	movies := catalog.NewPostgresStore(testdb.Pool(t))
+	mediaManager := &adminMediaManagerSpy{PostgresStore: movies}
 	_ = movies.Upsert(t.Context(), catalog.Movie{DoubanID: "1292052", Title: "电影"})
 	feedbackStore := feedback.NewPostgresStore(testdb.Pool(t))
 	_, _ = feedbackStore.Create(t.Context(), feedback.Feedback{Type: "bug", Content: "问题"})
 	cfg := config.Config{Env: "test", SiteName: "Moovie影牛", SiteURL: "https://moovie.example", AppSecret: "secret"}
-	pages := []string{"admin_dashboard", "admin_users", "admin_sites", "admin_cache", "admin_copyright", "admin_category", "admin_matches", "admin_jobs"}
+	pages := []string{"admin_dashboard", "admin_users", "admin_sites", "admin_cache", "admin_filters", "admin_matches", "admin_jobs"}
 	renderer, err := platformweb.LoadRenderer(filepath.Join("..", "..", "web", "templates"), pages)
 	if err != nil {
 		t.Fatal(err)
@@ -249,12 +336,63 @@ func adminTestRouter(t *testing.T) (*gin.Engine, *identity.PostgresStore, *searc
 	router := gin.New()
 	router.HTMLRender = renderer
 	NewHandler(cfg, users, searchStore, movies, feedbackStore, crawlerStub{}, nil,
-		WithMetricsReader(adminMetricsStub{})).Register(router)
+		WithMetricsReader(adminMetricsStub{}), WithMediaManager(mediaManager), WithTrendCacheInvalidator(searchStore)).Register(router)
 	now := time.Now()
 	adminToken, _ := auth.Sign(auth.Claims{UserID: 1, Role: "admin", Issued: now.Unix(), Expiry: now.Add(time.Hour).Unix()}, "secret")
 	userToken, _ := auth.Sign(auth.Claims{UserID: 2, Role: "user", Issued: now.Unix(), Expiry: now.Add(time.Hour).Unix()}, "secret")
-	return router, users, searchStore, feedbackStore, adminToken, userToken
+	return router, users, searchStore, feedbackStore, mediaManager, adminToken, userToken
 }
+
+type adminMediaManagerSpy struct {
+	*catalog.PostgresStore
+	searches int
+}
+
+func (manager *adminMediaManagerSpy) SearchAdminMedia(ctx context.Context, keyword string, limit int) ([]catalog.AdminMedia, error) {
+	manager.searches++
+	return manager.PostgresStore.SearchAdminMedia(ctx, keyword, limit)
+}
+
+type adminSearchStoreStub struct {
+	*search.PostgresStore
+	filters            []search.ContentFilter
+	trendInvalidations int
+}
+
+func (store *adminSearchStoreStub) ListContentFilters(context.Context) ([]search.ContentFilter, error) {
+	return append([]search.ContentFilter(nil), store.filters...), nil
+}
+
+func (store *adminSearchStoreStub) CreateContentFilter(_ context.Context, filter search.ContentFilter) (*search.ContentFilter, error) {
+	filter.ID = uint(len(store.filters) + 1)
+	filter.CreatedAt, filter.UpdatedAt = time.Now(), time.Now()
+	store.filters = append(store.filters, filter)
+	return &filter, nil
+}
+
+func (store *adminSearchStoreStub) UpdateContentFilter(_ context.Context, filter search.ContentFilter) error {
+	for index := range store.filters {
+		if store.filters[index].ID == filter.ID {
+			filter.CreatedAt = store.filters[index].CreatedAt
+			filter.UpdatedAt = time.Now()
+			store.filters[index] = filter
+			return nil
+		}
+	}
+	return nil
+}
+
+func (store *adminSearchStoreStub) DeleteContentFilter(_ context.Context, id uint) error {
+	for index := range store.filters {
+		if store.filters[index].ID == id {
+			store.filters = append(store.filters[:index], store.filters[index+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+func (store *adminSearchStoreStub) InvalidateTrendCache() { store.trendInvalidations++ }
 
 type adminMetricsStub struct{}
 

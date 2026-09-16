@@ -15,7 +15,7 @@
     {{ else }}
         {{ $playUrl = printf "/search?kw=%s" .Title }}
     {{ end }}
-    <a href="{{ $playUrl }}" class="movie-card{{ if and $.BlurNSFW .NSFW }} nsfw-blur{{ end }}" title="点击续播 {{ .Title }}"{{ if and $.BlurNSFW .NSFW }} onclick="if(this.classList.contains('nsfw-blur')){event.preventDefault();this.classList.remove('nsfw-blur')}"{{ end }}>
+    <a href="{{ $playUrl }}" class="movie-card{{ if and $.BlurSensitive .Sensitive }} sensitive-blur{{ end }}" title="点击续播 {{ .Title }}"{{ if and $.BlurSensitive .Sensitive }} onclick="if(this.classList.contains('sensitive-blur')){event.preventDefault();this.classList.remove('sensitive-blur')}"{{ end }}>
         <div class="movie-poster">
             <img src="{{ if .Poster }}{{ proxyImg .Poster }}{{ else }}/static/img/placeholder.svg{{ end }}" alt="{{ .Title }}" loading="lazy" onerror="this.onerror=null;this.src='/static/img/placeholder.svg'">
             {{ if gt .Progress 0 }}

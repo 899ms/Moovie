@@ -380,7 +380,7 @@ func (service *Service) IsCopyrightRestricted(ctx context.Context, title string)
 		return false, ""
 	}
 	for _, keyword := range keywords {
-		if keyword != "" && strings.Contains(title, keyword) {
+		if matchesKeyword(title, keyword) {
 			return true, keyword
 		}
 	}
@@ -505,7 +505,7 @@ func (service *Service) fetchFromSources(ctx context.Context, keyword string) ([
 	if service.health != nil {
 		sites, _ = service.health.FilterAvailable(sites)
 	}
-	categories, _ := service.filters.CategoryKeywords(ctx)
+	blockedKeywords, _ := service.filters.IngestBlockedKeywords(ctx)
 
 	workerCount := min(service.config.SourceMaxConcurrency, len(sites))
 	jobs := make(chan Site)
@@ -520,7 +520,7 @@ func (service *Service) fetchFromSources(ctx context.Context, keyword string) ([
 			for site := range jobs {
 				requestContext, cancel := context.WithTimeout(ctx, service.config.SourceTimeout)
 				startedAt := time.Now()
-				items, crawlErr := service.crawler.Search(requestContext, site.BaseURL, keyword, site.Key, categories)
+				items, crawlErr := service.crawler.Search(requestContext, site.BaseURL, keyword, site.Key, blockedKeywords)
 				elapsed := time.Since(startedAt)
 				outcome := classifyOutcome(requestContext, crawlErr, len(items))
 				cancel()
@@ -579,11 +579,16 @@ func (service *Service) filterCopyright(ctx context.Context, items []VodItem) ([
 
 // matchesCopyright 判断片名是否包含任一屏蔽词（忽略大小写）。
 func matchesCopyright(name string, keywords []string) bool {
-	lowerName := strings.ToLower(name)
 	for _, keyword := range keywords {
-		if strings.TrimSpace(keyword) != "" && strings.Contains(lowerName, strings.ToLower(keyword)) {
+		if matchesKeyword(name, keyword) {
 			return true
 		}
 	}
 	return false
+}
+
+// matchesKeyword 是内容规则统一的忽略大小写包含匹配；各调用方仍自行限定字段范围。
+func matchesKeyword(value, keyword string) bool {
+	keyword = strings.TrimSpace(keyword)
+	return keyword != "" && strings.Contains(strings.ToLower(value), strings.ToLower(keyword))
 }

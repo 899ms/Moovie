@@ -45,7 +45,7 @@ import (
 
 // contentPages 列出需要与共享 layout、partial 一起解析的页面模板。
 // 显式维护清单可以让模板缺失或重名在启动阶段暴露，而不是等用户访问时才报错。
-var contentPages = []string{"home", "search", "trends", "about", "advertise", "changelog", "dmca", "copyright_restricted", "privacy", "terms", "404", "player", "player_embed", "iptv", "tvbox", "watch", "login", "register", "dashboard", "settings", "notifications", "movie", "fetching", "recommendations", "foryou", "share", "share_monthly", "cinema", "feed", "following", "review", "collections", "collection", "admin_collections", "feedback", "admin_feedback", "discover", "admin_dashboard", "admin_users", "admin_sites", "admin_cache", "admin_copyright", "admin_category", "admin_nsfw", "admin_matches", "admin_jobs"}
+var contentPages = []string{"home", "search", "trends", "about", "advertise", "changelog", "dmca", "copyright_restricted", "privacy", "terms", "404", "player", "player_embed", "iptv", "tvbox", "watch", "login", "register", "dashboard", "settings", "notifications", "movie", "fetching", "recommendations", "foryou", "share", "share_monthly", "cinema", "feed", "following", "review", "collections", "collection", "admin_collections", "feedback", "admin_feedback", "discover", "admin_dashboard", "admin_users", "admin_sites", "admin_cache", "admin_filters", "admin_matches", "admin_jobs"}
 
 // discoverPopularAdapter 把播放域的热门结果转换成发现页需要的轻量结构。
 type discoverPopularAdapter struct{ provider playback.PopularProvider }
@@ -294,7 +294,7 @@ func main() {
 		workerDispatcher.Schedule(workqueue.Schedule{Spec: workqueue.Spec{TaskType: operations.TaskCleanup, SubjectKey: "global", Reason: "scheduled"}, Interval: 24 * time.Hour})
 		workerDispatcher.Schedule(workqueue.Schedule{Spec: workqueue.Spec{TaskType: operations.TaskHealthCheck, SubjectKey: "global", Reason: "scheduled"}, Interval: time.Hour, InitialDelay: time.Hour})
 		if metadataRefreshHandler != nil {
-			for _, taskType := range []string{catalog.RefreshProviderDouban, catalog.RefreshProviderReviews, catalog.RefreshProviderTMDB, catalog.RefreshProviderEmbedding} {
+			for _, taskType := range []string{catalog.RefreshProviderDouban, catalog.RefreshProviderReviews, catalog.RefreshProviderTMDB, catalog.RefreshProviderSemantic, catalog.RefreshProviderEmbedding} {
 				workerDispatcher.Handle(taskType, 10*time.Minute, metadataRefreshHandler.Handle)
 			}
 			workerDispatcher.Handle("metadata_schedule", 2*time.Minute, metadataRefreshHandler.Schedule)
@@ -355,8 +355,8 @@ func main() {
 	if episodeReader, ok := mediaIdentityStore.(mediaidentity.EpisodeReader); ok {
 		historyOptions = append(historyOptions, history.WithEpisodeReader(episodeReader))
 	}
-	if nsfwReader, ok := adminSearchStore.(history.NSFWKeywordReader); ok {
-		historyOptions = append(historyOptions, history.WithNSFWKeywordReader(nsfwReader))
+	if sensitiveReader, ok := adminSearchStore.(history.SensitiveKeywordReader); ok {
+		historyOptions = append(historyOptions, history.WithSensitiveKeywordReader(sensitiveReader))
 	}
 	historyHandler := history.NewHandler(historyStore, cfg.AppSecret, historyOptions...)
 	libraryHandler := library.NewHandler(libraryStore, cfg.AppSecret)
@@ -393,7 +393,8 @@ func main() {
 	danmakuClient := outbound.NewClient(25*time.Second, cfg.OutboundMaxConnsPerHost)
 	danmakuService := danmaku.NewService(danmakuStore, danmakuClient, cfg.Danmaku.APIBase)
 	danmakuHandler := danmaku.NewHandler(cfg, danmakuService)
-	adminOptions := []admin.HandlerOption{admin.WithMetricsReader(metricsStore)}
+	adminOptions := []admin.HandlerOption{admin.WithMetricsReader(metricsStore), admin.WithMediaManager(postgresCatalogStore),
+		admin.WithTrendCacheInvalidator(searchHandler)}
 	// 队列未接入时 queueStore 可能为 nil，此时后台不提供重试入口。
 	if retrier, ok := queueStore.(admin.JobRetrier); ok {
 		adminOptions = append(adminOptions, admin.WithJobRetrier(retrier))

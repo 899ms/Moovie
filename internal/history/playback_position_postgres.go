@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/TwoThreeWang/Moovie/new/internal/mediaview"
@@ -234,7 +235,7 @@ AND NOT EXISTS (
 ORDER BY position.activity_at DESC LIMIT $2 OFFSET $3`, userID, limit, offset)
 }
 
-// VodTags 批量查询资源站分类标签（vod_class + type_name）。
+// VodTags 批量查询敏感内容判断所需的资源站分类与标签。
 func (store *PostgresStore) VodTags(ctx context.Context, keys []VodKey) (map[VodKey]string, error) {
 	if len(keys) == 0 {
 		return nil, nil
@@ -245,7 +246,7 @@ func (store *PostgresStore) VodTags(ctx context.Context, keys []VodKey) (map[Vod
 		conditions = append(conditions, fmt.Sprintf("(source_key=$%d AND vod_id=$%d)", i*2+1, i*2+2))
 		args = append(args, k.SourceKey, k.VodID)
 	}
-	query := "SELECT source_key, vod_id, vod_class, type_name FROM vod_items WHERE " + joinOr(conditions)
+	query := "SELECT source_key, vod_id, vod_class, type_name, vod_tag FROM vod_items WHERE " + joinOr(conditions)
 	rows, err := store.database.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -253,17 +254,11 @@ func (store *PostgresStore) VodTags(ctx context.Context, keys []VodKey) (map[Vod
 	defer rows.Close()
 	result := make(map[VodKey]string, len(keys))
 	for rows.Next() {
-		var sk, vid, vc, tn string
-		if err := rows.Scan(&sk, &vid, &vc, &tn); err != nil {
+		var sk, vid, vc, tn, tag string
+		if err := rows.Scan(&sk, &vid, &vc, &tn, &tag); err != nil {
 			return nil, err
 		}
-		tags := vc
-		if tn != "" {
-			if tags != "" {
-				tags += ","
-			}
-			tags += tn
-		}
+		tags := strings.Join([]string{vc, tn, tag}, ",")
 		result[VodKey{SourceKey: sk, VodID: vid}] = tags
 	}
 	return result, rows.Err()

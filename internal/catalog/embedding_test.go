@@ -89,8 +89,48 @@ func TestEmbeddingServiceFallsBackToMetadataAndRejectsWrongDimension(t *testing.
 		t.Fatalf("error = %v", err)
 	}
 	movie, _ := store.FindByDoubanID(t.Context(), "1292052")
-	if movie.EmbeddingContent != "" || len(movie.Embedding) != 0 {
+	if movie.EmbeddingContent == "" || len(movie.Embedding) != 0 {
 		t.Fatalf("invalid embedding was persisted: %+v", movie)
+	}
+}
+
+func TestEmbeddingRetriesNeverCallGatewayAgainAfterSemanticContentIsSaved(t *testing.T) {
+	const rewritten = "已持久化的语义文本"
+	var gatewayCalls, vectorCalls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/chat/completions":
+			gatewayCalls.Add(1)
+			return testJSONResponse(request, http.StatusOK,
+				`{"choices":[{"message":{"content":"`+rewritten+`"}}]}`), nil
+		case "/api/embeddings":
+			vectorCalls.Add(1)
+			return testJSONResponse(request, http.StatusInternalServerError, `{}`), nil
+		default:
+			return testJSONResponse(request, http.StatusNotFound, `{}`), nil
+		}
+	})}
+	store := NewPostgresStore(testdb.Pool(t))
+	_ = store.Upsert(t.Context(), Movie{DoubanID: "1292052", Title: "肖申克的救赎", Summary: "越狱"})
+	markEmbeddingMetadataReady(t, store, "1292052")
+	oldVector := "[" + strings.Repeat("0,", embeddingDimensions-1) + "0]"
+	if _, err := store.database.Exec(t.Context(), `UPDATE media SET embedding = $2::vector WHERE douban_id = $1`, "1292052", oldVector); err != nil {
+		t.Fatal(err)
+	}
+	service := NewEmbeddingService(client, store, EmbeddingConfig{
+		OllamaHost: "https://ollama.test", CFGatewayURL: "https://gateway.test", CFAPIToken: "cf-token",
+	})
+	if err := service.GenerateSemanticContent(t.Context(), "1292052"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := service.GenerateEmbedding(t.Context(), "1292052"); err == nil {
+			t.Fatal("Ollama failure was accepted")
+		}
+	}
+	movie, _ := store.FindByDoubanID(t.Context(), "1292052")
+	if gatewayCalls.Load() != 1 || vectorCalls.Load() != 2 || movie.EmbeddingContent != rewritten || len(movie.Embedding) != 0 {
+		t.Fatalf("gateway/vector/movie = %d/%d/%+v", gatewayCalls.Load(), vectorCalls.Load(), movie)
 	}
 }
 
@@ -242,8 +282,11 @@ func TestEmbeddingServiceOnlyRebuildsWhenSemanticInputChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	movie, _ = store.FindByDoubanID(t.Context(), "1")
-	movie.Summary = "变化后的简介"
-	_ = store.Upsert(t.Context(), *movie)
+	if _, err := store.database.Exec(t.Context(), `UPDATE media
+SET summary = '变化后的简介', semantic_hash = 'changed', embedding_content = ''
+WHERE douban_id = '1'`); err != nil {
+		t.Fatal(err)
+	}
 	if err := service.Enrich(t.Context(), "1"); err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +314,6 @@ func TestEmbeddingServiceRejectsIncompleteMetadataBeforeCallingModels(t *testing
 		t.Fatalf("model calls = %d, want 0", calls.Load())
 	}
 }
-
 
 type embeddingStoreStub struct {
 	Store

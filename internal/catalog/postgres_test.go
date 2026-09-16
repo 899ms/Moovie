@@ -56,9 +56,9 @@ func TestPostgresStoreFindAndSitemapOrdering(t *testing.T) {
 	updatedAt := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)
 	reviewsAt := updatedAt.Add(-time.Hour)
 	nextRefreshAt := updatedAt.Add(24 * time.Hour)
-	// 列顺序与 movieColumns 一致：… imdb_id, media_type, series_status, backdrops, embedding_content, reviews_json,
-	// reviews_updated_at, metadata_status, completeness_score, next_refresh_at, updated_at, embedding::text。
-	values := []any{1, "1292052", "肖申克", "Original", "1994", "poster", 9.7, "剧情", "美国", "[]", "[]", "简介", "142分钟", "tt0111161", "movie", "Ended", "", "推荐语", "[]", reviewsAt, "ready", 92, &nextRefreshAt, updatedAt, ""}
+	// 列顺序与 movieColumns 一致：… metadata_status, completeness_score, next_refresh_at,
+	// updated_at, semantic_hash, embedding::text。
+	values := []any{1, "1292052", "肖申克", "Original", "1994", "poster", 9.7, "剧情", "美国", "[]", "[]", "简介", "142分钟", "tt0111161", "movie", "Ended", "", "推荐语", "[]", reviewsAt, "ready", 92, &nextRefreshAt, updatedAt, "semantic", ""}
 	fake := &catalogFakeDatabase{rows: &catalogFakeRows{values: [][]any{values}}}
 	store := NewPostgresStore(fake)
 	movie, err := store.FindByDoubanID(t.Context(), "1292052")
@@ -219,7 +219,8 @@ func TestPostgresUpdateEmbeddingUsesValidatedVectorCast(t *testing.T) {
 	store := NewPostgresStore(fake)
 	vector := make([]float32, 768)
 	vector[1] = 0.25
-	if err := store.UpdateEmbedding(t.Context(), "1292052", "语义文本", vector); err != nil {
+	updated, err := store.UpdateEmbedding(t.Context(), "1292052", "语义文本", vector)
+	if err != nil || !updated {
 		t.Fatal(err)
 	}
 	if !strings.Contains(fake.execQuery, "embedding = $3::vector") || !strings.Contains(fake.execQuery, "updated_at = NOW()") {
@@ -234,7 +235,7 @@ func TestPostgresUpdateEmbeddingUsesValidatedVectorCast(t *testing.T) {
 	}
 	bad := make([]float32, 768)
 	bad[3] = float32(math.NaN())
-	if err := store.UpdateEmbedding(t.Context(), "1292052", "bad", bad); err == nil {
+	if _, err := store.UpdateEmbedding(t.Context(), "1292052", "bad", bad); err == nil {
 		t.Fatal("non-finite vector was accepted")
 	}
 }
@@ -270,13 +271,20 @@ func TestPostgresMetadataRefreshQueueUsesUnifiedWorkerJobs(t *testing.T) {
 			t.Fatalf("active refresh query missing %q: %s", expected, fake.execQuery)
 		}
 	}
+	if err := store.ScheduleSemanticContentBackfills(t.Context(), 5); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"embedding_content = ''", "semantic_content", "semantic_hash", "semantic_backfill", "status = 'failed'"} {
+		if !strings.Contains(fake.execQuery, expected) {
+			t.Fatalf("semantic backfill query missing %q: %s", expected, fake.execQuery)
+		}
+	}
 	if err := store.ScheduleEmbeddingBackfills(t.Context(), 5); err != nil {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		"metadata_status <> 'partial'", "completeness_score >= 70",
-		"embedding_backfill",
-		"m.embedding IS NULL", "status IN ('pending', 'running')", "LIMIT $1",
+		"m.embedding_content <> ''", "embedding_backfill", "content_hash",
+		"m.embedding IS NULL", "status IN ('pending', 'running')", "status = 'failed'", "LIMIT $1",
 	} {
 		if !strings.Contains(fake.execQuery, expected) {
 			t.Fatalf("embedding backfill query missing %q: %s", expected, fake.execQuery)

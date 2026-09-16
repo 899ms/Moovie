@@ -48,9 +48,9 @@ func TestIngestBlocksNarrationAndTelecineWithoutWideningCategoryFilters(t *testi
 		{name: "Watchmen", item: VodItem{VodName: "Watchmen", TypeName: "动作片"}},
 		{name: "TCL不是枪版", item: VodItem{VodName: "TCL纪录片", VodRemarks: "正片"}},
 		{name: "干净条目", item: VodItem{VodName: "肖申克的救赎", TypeName: "电影", VodRemarks: "HD国语"}},
-		// 后台分类屏蔽词的口径不变：只看分类名，标题里出现同样的词不拦。
-		{name: "分类命中屏蔽词", item: VodItem{VodName: "某片", TypeName: "伦理片"}, restricted: []string{"伦理"}, blocked: true},
-		{name: "标题命中屏蔽词不拦", item: VodItem{VodName: "伦理学导论", TypeName: "纪录片"}, restricted: []string{"伦理"}},
+		{name: "分类命中禁止采集词", item: VodItem{VodName: "某片", TypeName: "伦理片"}, restricted: []string{"伦理"}, blocked: true},
+		{name: "标题命中禁止采集词", item: VodItem{VodName: "伦理学导论", TypeName: "纪录片"}, restricted: []string{"伦理"}, blocked: true},
+		{name: "标签忽略大小写命中", item: VodItem{VodName: "某片", VodTag: "Adult"}, restricted: []string{"adult"}, blocked: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			if got := ingestBlocked(testCase.item, testCase.restricted); got != testCase.blocked {

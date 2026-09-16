@@ -13,15 +13,15 @@ type SiteStore interface {
 	ListEnabled(ctx context.Context) ([]Site, error)
 }
 
-// FilterStore 提供版权屏蔽词和分类屏蔽词。
+// FilterStore 按用途读取内容过滤关键词。字段范围由各消费者自行决定。
 type FilterStore interface {
 	CopyrightKeywords(ctx context.Context) ([]string, error)
-	CategoryKeywords(ctx context.Context) ([]string, error)
+	IngestBlockedKeywords(ctx context.Context) ([]string, error)
 }
 
 // SourceCrawler 是对单个资源站发起搜索的抓取器（实现见 applecms.go）。
 type SourceCrawler interface {
-	Search(ctx context.Context, baseURL, keyword, sourceKey string, restrictedCategories []string) ([]VodItem, error)
+	Search(ctx context.Context, baseURL, keyword, sourceKey string, blockedKeywords []string) ([]VodItem, error)
 }
 
 // HealthMonitor 负责熔断：过滤掉连续失败的资源站，并记录每次抓取结果。

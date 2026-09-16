@@ -18,8 +18,8 @@ func TestTemplateInventoryMatchesLegacySource(t *testing.T) {
 		newFiles := relativeFiles(t, filepath.Join(newRoot, directory))
 		legacyFiles := relativeFiles(t, filepath.Join(legacyRoot, directory))
 		if directory == "pages" {
-			legacyFiles = removeStrings(legacyFiles, "square.html", "play.html")
-			legacyFiles = append(legacyFiles, "admin_jobs.html", "admin_matches.html", "watch.html")
+			legacyFiles = removeStrings(legacyFiles, "square.html", "play.html", "admin_copyright.html", "admin_category.html", "admin_nsfw.html")
+			legacyFiles = append(legacyFiles, "admin_jobs.html", "admin_matches.html", "admin_filters.html", "watch.html")
 			legacyFiles = append(legacyFiles, "cinema.html")
 			sort.Strings(legacyFiles)
 		} else if directory == "partials" {
@@ -122,8 +122,6 @@ func TestFrozenPublicFilesMatchLegacySource(t *testing.T) {
 		"templates/pages/admin_users.html",
 		"templates/pages/admin_sites.html",
 		"templates/pages/admin_cache.html",
-		"templates/pages/admin_copyright.html",
-		"templates/pages/admin_category.html",
 		"templates/partials/play_disclaimer.html",
 		"templates/partials/play_watched_button.html",
 		"templates/partials/user_movie_buttons.html",
@@ -212,8 +210,7 @@ var reviewedHTMXLoadingFiles = map[string]bool{
 	"pages/admin_users.html":                     true,
 	"pages/admin_sites.html":                     true,
 	"pages/admin_cache.html":                     true,
-	"pages/admin_copyright.html":                 true,
-	"pages/admin_category.html":                  true,
+	"pages/admin_filters.html":                   true,
 	"pages/admin_jobs.html":                      true,
 	"pages/advertise.html":                       true,
 	"pages/iptv.html":                            true,
@@ -450,7 +447,7 @@ func TestLayoutDiffIsLimitedToReviewedRuntimeExtensionPoints(t *testing.T) {
 	normalized = normalizeReviewedLayoutAccessibility(normalized)
 	normalized = strings.ReplaceAll(normalized, ` onerror="this.onerror=null;this.src='/static/img/placeholder.svg'"`, "")
 	// 页脚版本号随发布走，新旧两站各自准确即可，不要求同步。
-	normalized = strings.ReplaceAll(normalized, "Moovie 影牛(v4.1.2)", "Moovie 影牛(v3.4.0)")
+	normalized = strings.ReplaceAll(normalized, "Moovie 影牛(v4.2.1)", "Moovie 影牛(v3.4.0)")
 	if normalized != legacyLayout {
 		t.Fatal("shared layout contains changes beyond the reviewed SEO, CSRF, history-sync and accessibility extension points")
 	}

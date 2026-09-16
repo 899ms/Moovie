@@ -80,6 +80,11 @@ func (handler *Handler) Register(router *gin.Engine) {
 	router.GET("/trends", handler.trendsPage)
 }
 
+// InvalidateTrendCache 在敏感内容规则变化后立即清除两档热搜缓存。
+func (handler *Handler) InvalidateTrendCache() {
+	handler.trends.Clear()
+}
+
 // unifiedSearchAPI 返回 JSON 格式的统一搜索结果。
 func (handler *Handler) unifiedSearchAPI(c *gin.Context) {
 	result, ok := handler.runUnifiedSearch(c)

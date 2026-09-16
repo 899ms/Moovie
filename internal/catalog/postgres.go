@@ -35,19 +35,49 @@ func (store *PostgresStore) Count(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-// UpdateEmbedding 写入向量及其来源文本。semantic_hash 由规范元数据合并维护，
-// 这里不会用 AI 改写后的文本覆盖它。
-func (store *PostgresStore) UpdateEmbedding(ctx context.Context, doubanID, content string, embedding []float32) error {
+// SaveSemanticContent 只在元数据语义哈希仍匹配时保存文本，并清空旧向量。
+// 向量任务与文本更新同一事务入队，崩溃后也能由回填调度恢复。
+func (store *PostgresStore) SaveSemanticContent(ctx context.Context, doubanID, semanticHash, content string) (bool, error) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return false, fmt.Errorf("semantic content is empty")
+	}
+	var saved bool
+	err := database.InTransaction(ctx, store.database, func(db database.Executor) error {
+		affected, err := db.Exec(ctx, `UPDATE media SET embedding_content = $2, embedding = NULL, updated_at = NOW()
+WHERE douban_id = $1 AND semantic_hash = $3 AND embedding_content = ''`, doubanID, content, semanticHash)
+		if err != nil {
+			return fmt.Errorf("save semantic content: %w", err)
+		}
+		if affected == 0 {
+			return nil
+		}
+		saved = true
+		_, err = db.Exec(ctx, `INSERT INTO worker_jobs
+(task_type, subject_key, payload, reason, status, priority, available_at)
+VALUES ('embedding', $1, jsonb_build_object('douban_id', $1::text, 'content_hash', md5($2)),
+        'semantic_content_ready', 'pending', 0, NOW())
+ON CONFLICT (task_type, subject_key) WHERE status IN ('pending', 'running') DO NOTHING`, doubanID, content)
+		if err != nil {
+			return fmt.Errorf("enqueue embedding job: %w", err)
+		}
+		return nil
+	})
+	return saved, err
+}
+
+// UpdateEmbedding 只在语义文本没有变化时写入向量，防止慢任务覆盖新文本的结果。
+func (store *PostgresStore) UpdateEmbedding(ctx context.Context, doubanID, content string, embedding []float32) (bool, error) {
 	vector, err := vectorLiteral(embedding)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = store.database.Exec(ctx, `UPDATE media SET embedding_content = $2,
-embedding = $3::vector, updated_at = NOW() WHERE douban_id = $1`, doubanID, content, vector)
+	affected, err := store.database.Exec(ctx, `UPDATE media SET embedding = $3::vector, updated_at = NOW()
+WHERE douban_id = $1 AND embedding_content = $2 AND embedding IS NULL`, doubanID, content, vector)
 	if err != nil {
-		return fmt.Errorf("update media embedding: %w", err)
+		return false, fmt.Errorf("update media embedding: %w", err)
 	}
-	return nil
+	return affected > 0, nil
 }
 
 // vectorLiteral 把 float32 切片转成 pgvector 的文本字面量，并校验维度和数值合法性。
@@ -72,7 +102,7 @@ m.genres, m.countries, m.directors, m.actors, m.summary, m.duration,
 COALESCE((SELECT external_id FROM media_external_ids x WHERE x.media_id = m.id AND x.provider = 'imdb'
 ORDER BY x.is_primary DESC, x.updated_at DESC LIMIT 1), ''),
 m.media_type, m.series_status, m.backdrops, m.embedding_content, m.reviews_json,
-m.reviews_updated_at, m.metadata_status, m.completeness_score, m.next_refresh_at, m.updated_at,
+m.reviews_updated_at, m.metadata_status, m.completeness_score, m.next_refresh_at, m.updated_at, m.semantic_hash,
 COALESCE(m.embedding::text, '')`
 
 // FindByDoubanID 按豆瓣 ID 取一部影片，不存在时返回 (nil, nil)。
@@ -130,7 +160,7 @@ COALESCE((SELECT external_id FROM media_external_ids x WHERE x.media_id = m.id A
 ORDER BY x.is_primary DESC, x.updated_at DESC LIMIT 1), ''),
 m.media_type, m.series_status, m.backdrops, '' AS embedding_content, '[]' AS reviews_json,
 m.reviews_updated_at, m.metadata_status, m.completeness_score, m.next_refresh_at, m.updated_at,
-''
+m.semantic_hash, ''
 FROM media m
 JOIN LATERAL (SELECT embedding, media_type FROM media WHERE douban_id = $1 AND embedding IS NOT NULL) target ON true
 WHERE m.douban_id != $1 AND m.embedding IS NOT NULL AND m.media_type = target.media_type
@@ -525,7 +555,7 @@ func scanMovie(row interface{ Scan(...any) error }) (Movie, error) {
 		&movie.Summary, &movie.Duration, &movie.IMDbID, &movie.MediaType, &movie.SeriesStatus, &movie.Backdrops,
 		&movie.EmbeddingContent, &movie.ReviewsJSON,
 		&movie.ReviewsUpdatedAt, &movie.MetadataStatus, &movie.CompletenessScore,
-		&movie.NextRefreshAt, &movie.UpdatedAt, &embeddingText)
+		&movie.NextRefreshAt, &movie.UpdatedAt, &movie.semanticHash, &embeddingText)
 	if err != nil {
 		return movie, err
 	}
