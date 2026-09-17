@@ -17,7 +17,7 @@ func TestEmbeddedMigrationsIncludeCanonicalCutover(t *testing.T) {
 	for _, migration := range migrations {
 		versions = append(versions, migration.version)
 	}
-	expectedVersions := make([]string, 67)
+	expectedVersions := make([]string, 68)
 	for index := range expectedVersions {
 		expectedVersions[index] = fmt.Sprintf("%04d", index+1)
 	}
@@ -36,6 +36,21 @@ func TestEmbeddedMigrationsIncludeCanonicalCutover(t *testing.T) {
 	for _, required := range []string{"CREATE TABLE CONTENT_FILTERS", "CONTENT_FILTERS_KEYWORD_LENGTH", "CONTENT_FILTERS_HAS_ACTION", "CONTENT_FILTERS_KEYWORD_NORMALIZED_UNIQUE"} {
 		if !strings.Contains(upperSQL, required) {
 			t.Fatalf("content filter migration missing %q", required)
+		}
+	}
+	for _, required := range []string{"ADD COLUMN ACTOR_NAME", "ADD COLUMN ACTOR_AVATAR", "ADD COLUMN MOVIE_TITLE", "ADD COLUMN CONTENT"} {
+		if !strings.Contains(upperSQL, required) {
+			t.Fatalf("notification snapshot migration missing %q", required)
+		}
+	}
+	for _, required := range []string{"SET LOCAL LOCK_TIMEOUT = '1S'", "SET LOCAL STATEMENT_TIMEOUT = '5S'", "SET LOCAL LOCK_TIMEOUT = '0'", "SET LOCAL STATEMENT_TIMEOUT = '0'"} {
+		if !strings.Contains(upperSQL, required) {
+			t.Fatalf("notification snapshot migration missing online guard %q", required)
+		}
+	}
+	for _, migration := range migrations {
+		if migration.version == "0068" && strings.Contains(strings.ToUpper(migration.sql), "UPDATE ") {
+			t.Fatal("notification snapshot migration must not rewrite existing rows")
 		}
 	}
 	if !strings.Contains(upperSQL, "'系统告警'") {

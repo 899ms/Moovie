@@ -99,7 +99,10 @@ func (store *PostgresStore) LikedByUser(ctx context.Context, ids []int, userID i
 func (store *PostgresStore) ToggleLike(ctx context.Context, userMovieID, userID int) (int, bool, error) {
 	// 删除、插入和计数合并在一条 PostgreSQL 语句中，两个并发点击不会留下重复点赞。
 	row := store.database.QueryRow(ctx, `WITH target AS (
-  SELECT user_id AS recipient_user_id FROM user_movies WHERE id = $1
+  SELECT um.user_id AS recipient_user_id, um.title AS movie_title,
+         actor.username AS actor_name, actor.avatar AS actor_avatar
+  FROM user_movies um JOIN users actor ON actor.id = $2
+  WHERE um.id = $1
 ), deleted AS (
   DELETE FROM comment_likes WHERE user_movie_id = $1 AND user_id = $2 RETURNING 1
 ), inserted AS (
@@ -112,11 +115,14 @@ func (store *PostgresStore) ToggleLike(ctx context.Context, userMovieID, userID 
     AND EXISTS (SELECT 1 FROM deleted)
   RETURNING id
 ), saved_notification AS (
-  INSERT INTO social_notifications (recipient_user_id, actor_user_id, type, user_movie_id)
-  SELECT recipient_user_id, $2, 'comment_like', $1 FROM target
+  INSERT INTO social_notifications
+      (recipient_user_id, actor_user_id, type, user_movie_id, actor_name, actor_avatar, movie_title)
+  SELECT recipient_user_id, $2, 'comment_like', $1, actor_name, actor_avatar, movie_title FROM target
   WHERE recipient_user_id <> $2 AND EXISTS (SELECT 1 FROM inserted)
   ON CONFLICT (type, actor_user_id, recipient_user_id, (COALESCE(user_movie_id, 0)), (COALESCE(reply_id, 0)))
-  DO UPDATE SET read_at = NULL, created_at = NOW()
+  DO UPDATE SET read_at = NULL, created_at = NOW(),
+                actor_name = EXCLUDED.actor_name, actor_avatar = EXCLUDED.actor_avatar,
+                movie_title = EXCLUDED.movie_title
   RETURNING id
 )
 SELECT EXISTS (SELECT 1 FROM inserted)`, userMovieID, userID)
@@ -167,9 +173,12 @@ func (store *PostgresStore) CreateReply(ctx context.Context, userMovieID, userID
   INSERT INTO comment_replies (user_movie_id, user_id, content)
   VALUES ($1,$2,$3) RETURNING id, created_at
 ), saved_notification AS (
-  INSERT INTO social_notifications (recipient_user_id, actor_user_id, type, user_movie_id, reply_id)
-  SELECT um.user_id, $2, 'comment_reply', $1, reply.id
-  FROM reply JOIN user_movies um ON um.id = $1
+  INSERT INTO social_notifications
+      (recipient_user_id, actor_user_id, type, user_movie_id, reply_id,
+       actor_name, actor_avatar, movie_title, content)
+  SELECT um.user_id, $2, 'comment_reply', $1, reply.id,
+         actor.username, actor.avatar, um.title, $3
+  FROM reply JOIN user_movies um ON um.id = $1 JOIN users actor ON actor.id = $2
   WHERE um.user_id <> $2
   RETURNING id
 )
@@ -198,9 +207,8 @@ func (store *PostgresStore) CountUnreadNotifications(ctx context.Context, userID
 	return count, nil
 }
 
-// ListNotifications 列出互动消息。只有点赞需要按短评聚合（十个人赞同一条不该刷十行），
-// 其余类型走同一个分支：短评、回复都用 LEFT JOIN 接，缺哪个就是空，
-// 所以再加一种通知类型不用改这条 SQL。
+// ListNotifications 只从通知快照读取展示数据。点赞按短评聚合（十个人赞同一条不该刷十行），
+// 其余类型逐条展示；用户、短评、回复和资源表都不进入消息列表热路径。
 func (store *PostgresStore) ListNotifications(ctx context.Context, userID, limit int) ([]Notification, error) {
 	rows, err := store.database.Query(ctx, `WITH like_counts AS (
   SELECT user_movie_id, COUNT(*)::int AS actor_count, BOOL_OR(read_at IS NULL) AS unread,
@@ -209,33 +217,25 @@ func (store *PostgresStore) ListNotifications(ctx context.Context, userID, limit
   WHERE recipient_user_id = $1 AND type = 'comment_like'
   GROUP BY user_movie_id
 ), latest_likes AS (
-  SELECT DISTINCT ON (user_movie_id) id, user_movie_id, actor_user_id
+  SELECT DISTINCT ON (user_movie_id) id, user_movie_id, actor_user_id,
+         actor_name, actor_avatar, movie_title
   FROM social_notifications
   WHERE recipient_user_id = $1 AND type = 'comment_like'
   ORDER BY user_movie_id, created_at DESC, id DESC
 ), items AS (
-  SELECT latest.id, 'comment_like'::text AS type, latest.user_movie_id, um.movie_id,
-         `+mediaview.Column("title", "COALESCE(display_resource.vod_name,um.title)")+` AS movie_title,
-         latest.actor_user_id, actor.username AS actor_name, actor.avatar AS actor_avatar, actor.is_public AS actor_is_public,
+  SELECT latest.id, 'comment_like'::text AS type, latest.user_movie_id, latest.movie_title,
+         latest.actor_user_id, latest.actor_name, latest.actor_avatar,
          ''::text AS content, likes.actor_count, likes.unread, likes.created_at
   FROM like_counts likes
   JOIN latest_likes latest ON latest.user_movie_id = likes.user_movie_id
-  JOIN user_movies um ON um.id = latest.user_movie_id
-  LEFT JOIN media ON media.id = um.media_id `+mediaview.ResourceJoin("um.movie_id")+`
-  JOIN users actor ON actor.id = latest.actor_user_id
   UNION ALL
-  SELECT notification.id, notification.type, COALESCE(notification.user_movie_id, 0),
-         COALESCE(um.movie_id, ''), `+mediaview.Column("title", "COALESCE(display_resource.vod_name,um.title,'')")+`,
-         notification.actor_user_id, actor.username, actor.avatar, actor.is_public,
-         COALESCE(reply.content, ''), 1, notification.read_at IS NULL, notification.created_at
+  SELECT notification.id, notification.type, COALESCE(notification.user_movie_id, 0), notification.movie_title,
+         notification.actor_user_id, notification.actor_name, notification.actor_avatar,
+         notification.content, 1, notification.read_at IS NULL, notification.created_at
   FROM social_notifications notification
-  LEFT JOIN user_movies um ON um.id = notification.user_movie_id
-  LEFT JOIN media ON media.id = um.media_id `+mediaview.ResourceJoin("um.movie_id")+`
-  JOIN users actor ON actor.id = notification.actor_user_id
-  LEFT JOIN comment_replies reply ON reply.id = notification.reply_id
   WHERE notification.recipient_user_id = $1 AND notification.type <> 'comment_like'
 )
-SELECT id, type, user_movie_id, movie_id, movie_title, actor_user_id, actor_name, actor_avatar, actor_is_public,
+SELECT id, type, user_movie_id, movie_title, actor_user_id, actor_name, actor_avatar,
        content, actor_count, unread, created_at
 FROM items ORDER BY created_at DESC LIMIT $2`, userID, limit)
 	if err != nil {
@@ -246,8 +246,8 @@ FROM items ORDER BY created_at DESC LIMIT $2`, userID, limit)
 	for rows.Next() {
 		var notification Notification
 		if err := rows.Scan(&notification.ID, &notification.Type, &notification.UserMovieID,
-			&notification.MovieID, &notification.MovieTitle, &notification.ActorUserID,
-			&notification.ActorName, &notification.ActorAvatar, &notification.ActorIsPublic, &notification.Content,
+			&notification.MovieTitle, &notification.ActorUserID,
+			&notification.ActorName, &notification.ActorAvatar, &notification.Content,
 			&notification.ActorCount, &notification.Unread, &notification.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan notification: %w", err)
 		}
@@ -259,11 +259,9 @@ FROM items ORDER BY created_at DESC LIMIT $2`, userID, limit)
 	return notifications, nil
 }
 
-// ReadNotification 标记一项已读并返回跳转主体及作者当前的主页公开状态。
+// ReadNotification 标记一项已读并返回直接跳转所需的目标 ID。
 func (store *PostgresStore) ReadNotification(ctx context.Context, notificationID, userID int) (NotificationTarget, error) {
 	var target NotificationTarget
-	// 短评用 LEFT JOIN 接：关注类通知没有短评主体，用 JOIN 会把整行过滤掉，
-	// 已读标记写进去了却查不到返回值，前端会当成「消息不存在」。
 	err := store.database.QueryRow(ctx, `WITH selected AS (
   SELECT id, type, user_movie_id, actor_user_id FROM social_notifications
   WHERE id = $1 AND recipient_user_id = $2
@@ -275,10 +273,8 @@ func (store *PostgresStore) ReadNotification(ctx context.Context, notificationID
          (selected.type = 'comment_like' AND notification.type = 'comment_like'
           AND notification.user_movie_id = selected.user_movie_id))
 )
-SELECT COALESCE(selected.user_movie_id, 0), BTRIM(COALESCE(um.comment, '')) <> '', selected.actor_user_id, actor.is_public
-FROM selected LEFT JOIN user_movies um ON um.id = selected.user_movie_id
-JOIN users actor ON actor.id = selected.actor_user_id`,
-		notificationID, userID).Scan(&target.UserMovieID, &target.CommentAvailable, &target.ActorUserID, &target.ActorIsPublic)
+SELECT COALESCE(selected.user_movie_id, 0), selected.actor_user_id FROM selected`,
+		notificationID, userID).Scan(&target.UserMovieID, &target.ActorUserID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NotificationTarget{}, ErrNotificationUnavailable
 	}
@@ -452,6 +448,8 @@ func (store *PostgresStore) ToggleFollow(ctx context.Context, followerID, follow
 	}
 	row := store.database.QueryRow(ctx, `WITH target AS (
   SELECT id FROM users WHERE id = $2 AND is_public = TRUE
+), actor AS (
+  SELECT username, avatar FROM users WHERE id = $1
 ), deleted AS (
   DELETE FROM user_follows WHERE follower_id = $1 AND followee_id = $2 RETURNING 1
 ), inserted AS (
@@ -464,10 +462,12 @@ func (store *PostgresStore) ToggleFollow(ctx context.Context, followerID, follow
     AND EXISTS (SELECT 1 FROM deleted)
   RETURNING id
 ), saved_notification AS (
-  INSERT INTO social_notifications (recipient_user_id, actor_user_id, type)
-  SELECT $2, $1, 'follow' WHERE EXISTS (SELECT 1 FROM inserted)
+  INSERT INTO social_notifications (recipient_user_id, actor_user_id, type, actor_name, actor_avatar)
+  SELECT $2, $1, 'follow', actor.username, actor.avatar FROM actor
+  WHERE EXISTS (SELECT 1 FROM inserted)
   ON CONFLICT (type, actor_user_id, recipient_user_id, (COALESCE(user_movie_id, 0)), (COALESCE(reply_id, 0)))
-  DO UPDATE SET read_at = NULL, created_at = NOW()
+  DO UPDATE SET read_at = NULL, created_at = NOW(),
+                actor_name = EXCLUDED.actor_name, actor_avatar = EXCLUDED.actor_avatar
   RETURNING id
 )
 SELECT EXISTS (SELECT 1 FROM inserted), EXISTS (SELECT 1 FROM deleted), EXISTS (SELECT 1 FROM target)`, followerID, followeeID)

@@ -134,6 +134,22 @@ func TestInteractionNotificationsAggregateLikesAndTrackReadState(t *testing.T) {
 	if len(notifications) != 2 || notifications[0].Type != "comment_reply" || notifications[0].Content != "我也这么觉得" {
 		t.Fatalf("notifications after reply = %+v", notifications)
 	}
+	if notifications[0].ActorName != "片友甲" || notifications[0].ActorAvatar != "🍿" || notifications[0].MovieTitle != "肖申克的救赎" {
+		t.Fatalf("notification snapshots = %+v", notifications[0])
+	}
+	if err := users.UpdateUsername(t.Context(), actor.ID, "后来改名"); err != nil {
+		t.Fatal(err)
+	}
+	if err := users.UpdateAvatar(t.Context(), actor.ID, "🎞️"); err != nil {
+		t.Fatal(err)
+	}
+	if err := movies.Upsert(t.Context(), library.Record{UserID: owner.ID, MovieID: "1292052", Title: "后来改名的影片", Status: library.StatusWatched, Comment: "值得重看"}); err != nil {
+		t.Fatal(err)
+	}
+	notifications, _ = store.ListNotifications(t.Context(), owner.ID, 50)
+	if notifications[0].ActorName != "片友甲" || notifications[0].ActorAvatar != "🍿" || notifications[0].MovieTitle != "肖申克的救赎" {
+		t.Fatalf("historical notification snapshots changed = %+v", notifications[0])
+	}
 	replyNotificationID := notifications[0].ID
 	likeNotificationID := notifications[1].ID
 	forbiddenDelete := performRequest(router, http.MethodDelete, "/notifications/"+itoa(replyNotificationID), "", actorToken)

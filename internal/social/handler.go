@@ -364,7 +364,7 @@ func (handler *Handler) unreadNotificationCount(c *gin.Context) {
 	c.HTML(http.StatusOK, "partials/notification_badge.html", gin.H{"Count": count})
 }
 
-// readNotification 标记一项已读，再跳到原短评或公开主页；私密主页留在消息列表。
+// readNotification 标记一项已读，再直接跳到原短评或用户主页；目标页负责 404。
 func (handler *Handler) readNotification(c *gin.Context) {
 	id, err := positiveID(c.Param("id"))
 	if err != nil {
@@ -378,14 +378,6 @@ func (handler *Handler) readNotification(c *gin.Context) {
 	}
 	if err != nil {
 		c.String(http.StatusInternalServerError, "消息暂时无法打开，请稍后重试")
-		return
-	}
-	if target.UserMovieID > 0 && !target.CommentAvailable {
-		handler.renderNotificationList(c, auth.UserID(c), "原短评已清空或不可用，消息已标记为已读。")
-		return
-	}
-	if target.UserMovieID == 0 && !target.ActorIsPublic {
-		handler.renderNotificationList(c, auth.UserID(c), "对方主页未公开，消息已标记为已读。")
 		return
 	}
 	destination := fmt.Sprintf("/user/%d", target.ActorUserID)

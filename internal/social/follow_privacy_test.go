@@ -13,7 +13,7 @@ import (
 	"github.com/TwoThreeWang/Moovie/new/internal/report"
 )
 
-func TestFollowNotificationRespectsCurrentProfilePrivacy(t *testing.T) {
+func TestFollowNotificationRedirectsAndProfileOwnsPrivacy(t *testing.T) {
 	router, users, movies, store, owner, token := socialTestRouter(t)
 	report.NewHandler(config.Config{Env: "test", AppSecret: "secret"}, users, movies,
 		report.NewPostgresStore(testdb.Pool(t)), nil, store).Register(router)
@@ -35,28 +35,26 @@ func TestFollowNotificationRespectsCurrentProfilePrivacy(t *testing.T) {
 	if count, err := store.CountUnreadNotifications(t.Context(), owner.ID); err != nil || count != 1 {
 		t.Fatalf("unread before owner reads = %d/%v", count, err)
 	}
-	// 读取时检查最新状态：从未公开、公开、打开列表后关闭主页都要正确处理。
+	// 消息只负责跳转；公开状态由用户主页统一判断。
 	for _, public := range []bool{false, true, false} {
 		if err := users.UpdateIsPublic(t.Context(), actor.ID, public); err != nil {
 			t.Fatal(err)
 		}
 		page := performRequest(router, http.MethodGet, "/notifications", "", token)
-		if page.Code != http.StatusOK || strings.Contains(page.Body.String(), "对方主页未公开") == public {
-			t.Fatalf("notification privacy hint public=%v: %d/%s", public, page.Code, page.Body.String())
+		if page.Code != http.StatusOK || strings.Contains(page.Body.String(), "对方主页未公开") {
+			t.Fatalf("notification list checked privacy public=%v: %d/%s", public, page.Code, page.Body.String())
 		}
 		read := performRequest(router, http.MethodPost, endpoint, "", token)
 		if read.Code != http.StatusOK {
 			t.Fatalf("read = %d/%s", read.Code, read.Body.String())
 		}
 		profile := performRequest(router, http.MethodGet, "/user/"+itoa(actor.ID), "", token)
+		wantProfileStatus := http.StatusNotFound
 		if public {
-			if read.Header().Get("HX-Redirect") != "/user/"+itoa(actor.ID) || profile.Code != http.StatusOK {
-				t.Fatalf("public profile redirect = %q/status=%d", read.Header().Get("HX-Redirect"), profile.Code)
-			}
-		} else if read.Header().Get("HX-Redirect") != "" || read.Header().Get("HX-Retarget") != "#notification-list" ||
-			read.Header().Get("HX-Reswap") != "innerHTML" || read.Header().Get("HX-Trigger") != "notificationsChanged" ||
-			!strings.Contains(read.Body.String(), "对方主页未公开") || strings.Contains(read.Body.String(), "is-unread") || profile.Code != http.StatusNotFound {
-			t.Fatalf("private notification = headers=%v/body=%s/profile=%d", read.Header(), read.Body.String(), profile.Code)
+			wantProfileStatus = http.StatusOK
+		}
+		if read.Header().Get("HX-Redirect") != "/user/"+itoa(actor.ID) || profile.Code != wantProfileStatus {
+			t.Fatalf("profile redirect public=%v = %q/status=%d", public, read.Header().Get("HX-Redirect"), profile.Code)
 		}
 		if count, err := store.CountUnreadNotifications(t.Context(), owner.ID); err != nil || count != 0 {
 			t.Fatalf("unread after reading = %d/%v", count, err)

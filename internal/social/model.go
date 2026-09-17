@@ -61,12 +61,10 @@ type FollowState struct {
 }
 
 // NotificationTarget 是点开一条通知后应该去的地方。
-// UserMovieID 为 0 表示这条通知没有短评主体（例如关注），仅在作者主页公开时跳转。
+// UserMovieID 为 0 表示这条通知没有短评主体（例如关注），直接跳到作者主页。
 type NotificationTarget struct {
-	UserMovieID      int
-	CommentAvailable bool
-	ActorUserID      int
-	ActorIsPublic    bool
+	UserMovieID int
+	ActorUserID int
 }
 
 // Reply 是一条短评回复。
@@ -81,17 +79,15 @@ type Reply struct {
 
 // Notification 是消息页的一条互动；同一短评的点赞在查询时聚合。
 type Notification struct {
-	ID            int
-	Type          string
-	UserMovieID   int
-	MovieID       string
-	MovieTitle    string
-	ActorUserID   int
-	ActorName     string
-	ActorAvatar   string
-	ActorIsPublic bool
-	Content       string
-	ActorCount    int
-	Unread        bool
-	CreatedAt     time.Time
+	ID          int
+	Type        string
+	UserMovieID int
+	MovieTitle  string
+	ActorUserID int
+	ActorName   string
+	ActorAvatar string
+	Content     string
+	ActorCount  int
+	Unread      bool
+	CreatedAt   time.Time
 }

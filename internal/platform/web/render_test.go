@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadRendererKeepsPageDefinitionsIsolated(t *testing.T) {
@@ -129,6 +130,38 @@ func TestNotificationsPageRendersItsStylesAndOnlyOneActiveSidebarItem(t *testing
 	}
 	if strings.Count(html, `class="nav-item active"`) != 1 {
 		t.Fatalf("active sidebar items = %d, want 1", strings.Count(html, `class="nav-item active"`))
+	}
+}
+
+func TestNotificationsPageGracefullyRendersPreSnapshotRows(t *testing.T) {
+	renderer, err := LoadRenderer(filepath.Join("..", "..", "..", "web", "templates"), []string{"notifications"})
+	if err != nil {
+		t.Fatalf("LoadRenderer() error = %v", err)
+	}
+	compiled := renderer.templates["notifications.html"]
+	notification := struct {
+		ID, ActorCount      int
+		Type, ActorName     string
+		ActorAvatar         string
+		MovieTitle, Content string
+		Unread              bool
+		CreatedAt           time.Time
+	}{ID: 1, ActorCount: 1, Type: "comment_like", Unread: true, CreatedAt: time.Now()}
+	data := map[string]any{
+		"Title": "消息", "ActiveMenu": "notifications", "Notifications": []any{notification},
+		"UserInfo": struct {
+			ID       int
+			Username string
+			Role     string
+		}{ID: 1, Username: "tester", Role: "user"},
+	}
+	var output bytes.Buffer
+	if err := compiled.template.ExecuteTemplate(&output, compiled.entry, data); err != nil {
+		t.Fatalf("render legacy notification: %v", err)
+	}
+	html := output.String()
+	if !strings.Contains(html, "一位片友") || !strings.Contains(html, "赞了你的短评") || strings.Contains(html, "《》") {
+		t.Fatalf("legacy notification fallback = %s", html)
 	}
 }
 

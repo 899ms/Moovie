@@ -10,13 +10,12 @@
             <span class="notification-copy">
                 <span class="notification-summary">
                     <strong>{{ default "一位片友" .ActorName }}</strong>
-                    {{ if eq .Type "comment_like" }}{{ if gt .ActorCount 1 }}等 {{ .ActorCount }} 人{{ end }}赞了你对《{{ .MovieTitle }}》的短评
-                    {{ else if eq .Type "comment_reply" }}回复了你对《{{ .MovieTitle }}》的短评
+                    {{ if eq .Type "comment_like" }}{{ if gt .ActorCount 1 }}等 {{ .ActorCount }} 人{{ end }}赞了你{{ if .MovieTitle }}对《{{ .MovieTitle }}》{{ end }}的短评
+                    {{ else if eq .Type "comment_reply" }}回复了你{{ if .MovieTitle }}对《{{ .MovieTitle }}》{{ end }}的短评
                     {{ else if eq .Type "follow" }}关注了你
                     {{ else }}和你有了新的互动{{ end }}
                 </span>
                 {{ if .Content }}<span class="notification-content">{{ .Content }}</span>{{ end }}
-                {{ if and (eq .Type "follow") (not .ActorIsPublic) }}<span class="notification-content">对方主页未公开</span>{{ end }}
                 <time>{{ .CreatedAt.Format "2006-01-02 15:04" }}</time>
             </span>
             {{ if .Unread }}<span class="notification-unread-dot" aria-label="未读"></span>{{ end }}

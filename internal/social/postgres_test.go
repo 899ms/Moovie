@@ -20,7 +20,7 @@ func TestPostgresToggleLikeIsAtomicAndUsesUniqueConflictGuard(t *testing.T) {
 	if err != nil || !liked || count != 3 {
 		t.Fatalf("ToggleLike() = %d/%v/%v", count, liked, err)
 	}
-	for _, expected := range []string{"WITH target AS", "deleted AS", "DELETE FROM comment_likes", "INSERT INTO comment_likes", "saved_notification AS", "ON CONFLICT (user_movie_id, user_id) DO NOTHING"} {
+	for _, expected := range []string{"WITH target AS", "deleted AS", "DELETE FROM comment_likes", "INSERT INTO comment_likes", "saved_notification AS", "actor_name", "actor_avatar", "movie_title", "ON CONFLICT (user_movie_id, user_id) DO NOTHING"} {
 		if !strings.Contains(fake.queries[0], expected) {
 			t.Fatalf("toggle query missing %q: %s", expected, fake.queries[0])
 		}
@@ -31,6 +31,21 @@ func TestPostgresToggleLikeIsAtomicAndUsesUniqueConflictGuard(t *testing.T) {
 	}
 	if !reflect.DeepEqual(fake.argsList[0], []any{9, 7}) {
 		t.Fatalf("toggle arguments = %#v", fake.argsList[0])
+	}
+}
+
+func TestListNotificationsReadsOnlyNotificationSnapshots(t *testing.T) {
+	fake := &socialFakeDatabase{}
+	_, _ = NewPostgresStore(fake).ListNotifications(t.Context(), 7, 50)
+	for _, expected := range []string{"actor_name", "actor_avatar", "movie_title", "notification.content"} {
+		if !strings.Contains(fake.query, expected) {
+			t.Fatalf("notification query missing snapshot %q: %s", expected, fake.query)
+		}
+	}
+	for _, forbidden := range []string{"JOIN users", "JOIN user_movies", "JOIN media", "vod_items", "comment_replies"} {
+		if strings.Contains(fake.query, forbidden) {
+			t.Fatalf("notification query still reads %q: %s", forbidden, fake.query)
+		}
 	}
 }
 

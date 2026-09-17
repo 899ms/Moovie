@@ -56,7 +56,7 @@ func TestNotificationsOpenOlderCommentWithReplies(t *testing.T) {
 	}
 }
 
-func TestUnavailableNotificationTargetsStayInMessageList(t *testing.T) {
+func TestUnavailableNotificationTargetsRedirectToTarget404(t *testing.T) {
 	router, users, movies, store, owner, token := socialTestRouter(t)
 	actor, err := users.Create(t.Context(), identity.User{Email: "actor@example.com", Username: "片友", Role: "user", CreatedAt: time.Now()})
 	if err != nil {
@@ -84,8 +84,12 @@ func TestUnavailableNotificationTargetsStayInMessageList(t *testing.T) {
 	}
 	for _, notification := range notifications {
 		read := performRequest(router, http.MethodPost, "/notifications/"+itoa(notification.ID)+"/read", "", token)
-		if read.Code != http.StatusOK || read.Header().Get("HX-Redirect") != "" || read.Header().Get("HX-Retarget") != "#notification-list" || read.Header().Get("HX-Reswap") != "innerHTML" || read.Header().Get("HX-Trigger") != "notificationsChanged" || !strings.Contains(read.Body.String(), "原短评已清空或不可用") {
-			t.Fatalf("%s cleared comment = %d/%v/%s", notification.Type, read.Code, read.Header(), read.Body.String())
+		if read.Code != http.StatusOK || read.Header().Get("HX-Redirect") != "/review/"+itoa(comment.ID) {
+			t.Fatalf("%s cleared comment redirect = %d/%v", notification.Type, read.Code, read.Header())
+		}
+		page := performRequest(router, http.MethodGet, read.Header().Get("HX-Redirect"), "", token)
+		if page.Code != http.StatusNotFound {
+			t.Fatalf("%s cleared comment target = %d/%s", notification.Type, page.Code, page.Body.String())
 		}
 	}
 	if count, err := store.CountUnreadNotifications(t.Context(), owner.ID); err != nil || count != 0 {
