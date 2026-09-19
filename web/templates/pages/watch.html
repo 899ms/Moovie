@@ -145,6 +145,14 @@
 
         <!-- 操作行 -->
         <div class="watch-action-row">
+            {{ if .PlayURL }}
+            <a id="downloadCurrentVideo" class="watch-action-btn"
+               href="https://www.zngg.net/tool/detail/M3U8V2Pro?url={{ urlquery .PlayURL }}"
+               target="_blank" rel="noopener noreferrer nofollow" referrerpolicy="no-referrer">
+                <svg class="w-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4"></path></svg>
+                <span>下载当前视频（第三方）</span>
+            </a>
+            {{ end }}
             {{ if .DoubanID }}{{ if ne .DoubanID "0" }}
             <span hx-get="/api/htmx/watch-actions?douban_id={{ .DoubanID }}&title={{ urlquery .View.Title }}&poster={{ urlquery .View.Poster }}&year={{ urlquery .View.Year }}&redirect={{ urlquery .FullPath }}"
                   hx-trigger="load"

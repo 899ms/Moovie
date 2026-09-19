@@ -357,7 +357,7 @@ func TestPlayPagePreservesNotFoundInvalidEpisodeAndCopyrightStatuses(t *testing.
 		t.Fatalf("missing status/body = %d/%s", missing.Code, missing.Body.String())
 	}
 	invalidEpisode := performRequest(router, "/play/source/42?ep=%E4%B8%8D%E5%AD%98%E5%9C%A8", nil)
-	if invalidEpisode.Code != http.StatusOK || !strings.Contains(invalidEpisode.Body.String(), "暂无可用播放链接") {
+	if invalidEpisode.Code != http.StatusOK || !strings.Contains(invalidEpisode.Body.String(), "暂无可用播放链接") || strings.Contains(invalidEpisode.Body.String(), `id="downloadCurrentVideo"`) {
 		t.Fatalf("invalid episode status/body = %d/%s", invalidEpisode.Code, invalidEpisode.Body.String())
 	}
 
@@ -563,7 +563,7 @@ func TestPlayerPagesShareTheSamePlayerAndLazySections(t *testing.T) {
 			return []mediaidentity.ResourceCandidate{{Episode: mediaidentity.Episode{
 				CandidateKey: "candidate-9", LineLabel: "默认源", SourceKey: "source", VodID: "42",
 				MediaID: 7, MediaUnitID: 6, SeasonNumber: 1, EpisodeKey: "S01E01", EpisodeLabel: "第01集",
-				PlayURL: "https://video.example/ep1.m3u8",
+				PlayURL: "https://video.example/ep1.m3u8?token=a&sig=b",
 			}, MappingConfidence: 1}}, nil
 		}),
 	}
@@ -578,6 +578,8 @@ func TestPlayerPagesShareTheSamePlayerAndLazySections(t *testing.T) {
 		`npm/artplayer-plugin-danmuku`,                        // play_scripts.html：弹幕插件
 		`hx-get="/api/htmx/movie-comments?douban_id=1292052"`, // play_comments.html
 		`hx-get="/api/htmx/similar?douban_id=1292052"`,        // play_similar.html
+		`id="downloadCurrentVideo"`,                            // watch.html：两个入口共用当前视频下载入口
+		`M3U8V2Pro?url=https%3A%2F%2Fvideo.example%2Fep1.m3u8%3Ftoken%3Da%26sig%3Db`,
 	}
 	for _, path := range []string{"/play/source/42?douban_id=1292052", "/watch/1292052"} {
 		response := performRequest(router, path, nil)
