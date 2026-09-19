@@ -23,6 +23,6 @@ func Column(field, fallback string) string {
 // ResourceJoin 只在规范记录不存在时批量回退到资源资料，最后才使用用户记录快照。
 func ResourceJoin(doubanExpression string) string {
 	return ` LEFT JOIN LATERAL (SELECT v.vod_name,v.vod_pic,v.vod_year FROM vod_items v
-WHERE media.id IS NULL AND v.vod_douban_id=` + doubanExpression + `
+WHERE media.id IS NULL AND v.vod_douban_id <> '' AND v.vod_douban_id=` + doubanExpression + `
 ORDER BY v.last_seen_at DESC NULLS LAST,v.source_key,v.vod_id LIMIT 1) display_resource ON TRUE `
 }

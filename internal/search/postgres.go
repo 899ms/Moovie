@@ -201,7 +201,8 @@ WHERE resource.source_key = $1 AND resource.vod_id = $2 LIMIT 1`, sourceKey, vod
 // SearchByDoubanID 按豆瓣 ID 找出所有对应资源。
 func (store *PostgresStore) SearchByDoubanID(ctx context.Context, doubanID string) ([]VodItem, error) {
 	rows, err := store.database.Query(ctx, `SELECT `+vodItemColumns+` FROM vod_items resource `+resourceMediaLinkJoin+`
-WHERE resource.vod_douban_id = $1 AND resource.resource_status NOT IN ('removed','retired','deleted')
+WHERE resource.vod_douban_id = $1 AND resource.vod_douban_id <> ''
+AND resource.resource_status NOT IN ('removed','retired','deleted')
 AND EXISTS(SELECT 1 FROM sites WHERE sites.key=resource.source_key AND sites.enabled)
 ORDER BY resource.last_visited_at DESC`, doubanID)
 	if err != nil {
